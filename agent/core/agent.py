@@ -21,6 +21,7 @@ from .reflector import Reflector
 from .self_model import SelfModel
 from agent.hive.orchestrator import OrchestratorAgent
 from agent.hive.roles import ROLES
+from agent.hive.asset_pipeline import AssetPipelineAgent, ENGINE_SETUP
 
 try:
     from rich.console import Console
@@ -133,6 +134,10 @@ class NexusAgent:
         )
         self._hive.set_print(self._hive_log)
 
+        # ── Asset pipeline ────────────────────────────────────────────────
+        self._assets = AssetPipelineAgent(self._model, data_dir)
+        self._assets.set_print(self._hive_log)
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def chat(self, message: str) -> str:
@@ -163,7 +168,19 @@ class NexusAgent:
 
     def run_project(self, goal: str) -> "Project":
         """Run the full Hive pipeline for a project goal."""
-        return self._hive.run_project(goal, parallel=False)  # parallel=True if model supports concurrent
+        return self._hive.run_project(goal, parallel=False)
+
+    def create_assets(self, request: str, engines: list[str] = None) -> list:
+        """Run the asset pipeline: Blender → engine importers."""
+        pkgs = self._assets.run(request, engines or ["unreal", "unity", "godot"])
+        if self._memory:
+            names = ", ".join(p.asset_name for p in pkgs)
+            self._memory.store_fact(
+                f"Created 3D assets: {names} for {request}. Exported for {engines}.",
+                importance=0.8,
+                metadata={"asset_pipeline": True},
+            )
+        return pkgs
 
     def _hive_log(self, msg: str):
         if HAS_RICH and _console:
@@ -287,6 +304,8 @@ class NexusAgent:
             "/status": self._cmd_status,
             "/project": self._cmd_project,
             "/projects": self._cmd_projects,
+            "/asset": self._cmd_asset,
+            "/assets": self._cmd_assets,
             "/skills": self._cmd_skills,
             "/learn": self._cmd_learn,
             "/skill": self._cmd_skill,
@@ -329,6 +348,13 @@ class NexusAgent:
 |---|---|
 | `/project <goal>` | Spawn a full specialist team to build your project |
 | `/projects` | List all completed projects |
+
+**🎨 Asset Pipeline (Blender → Engines)**
+| Command | Description |
+|---|---|
+| `/asset <description>` | Create 3D asset in Blender, export to all 3 engines |
+| `/asset <description> --engines unreal,godot` | Target specific engines |
+| `/assets` | List all created assets |
 
 **⚙️ System**
 | Command | Description |
@@ -550,6 +576,69 @@ class NexusAgent:
         else:
             for p in sorted(projects):
                 print(f"  {p.name}/")
+
+    def _cmd_asset(self, arg: str):
+        """Usage: /asset <description> [--engines unreal,unity,godot]"""
+        if not arg:
+            _p(
+                "Usage: /asset <description> [--engines unreal,unity,godot]\n\n"
+                "Examples:\n"
+                "  /asset a medieval sword for a dark fantasy RPG\n"
+                "  /asset a low-poly treasure chest --engines godot,unity\n"
+                "  /asset a sci-fi spaceship hull --engines unreal\n"
+                "  /asset a wooden barrel prop --engines unity,godot\n\n"
+                "Engines: unreal | unity | godot  (default: all three)"
+            )
+            return
+
+        # Parse --engines flag
+        engines = ["unreal", "unity", "godot"]
+        request = arg
+        if "--engines" in arg:
+            parts = arg.split("--engines")
+            request = parts[0].strip()
+            engines_raw = [e.strip() for e in parts[1].split(",")]
+            engines = engines_raw
+
+        if HAS_RICH:
+            _console.rule("[bold cyan]Asset Pipeline[/bold cyan]")
+        try:
+            packages = self.create_assets(request, engines)
+            if HAS_RICH:
+                _console.rule("[bold green]Pipeline Complete[/bold green]")
+                t = Table(title=f"Assets Created ({len(packages)})", header_style="bold cyan")
+                t.add_column("Asset"); t.add_column("Script"); t.add_column("FBX"); t.add_column("GLB"); t.add_column("Engines")
+                for pkg in packages:
+                    has_fbx = "✓" if pkg.fbx_path() and pkg.fbx_path().exists() else "script only"
+                    has_glb = "✓" if pkg.glb_path() and pkg.glb_path().exists() else "script only"
+                    eng_dirs = [e for e in engines if (pkg.asset_dir / e).exists()]
+                    t.add_row(pkg.asset_name, "✓", has_fbx, has_glb, " ".join(eng_dirs))
+                _console.print(t)
+        except Exception as e:
+            _p(f"[red]Asset pipeline error: {e}[/red]" if HAS_RICH else f"Error: {e}")
+
+    def _cmd_assets(self, _):
+        assets_dir = self._data_dir / "assets"
+        if not assets_dir.exists():
+            _p("No assets created yet. Use /asset <description> to create one.")
+            return
+        asset_list = [p for p in assets_dir.iterdir() if p.is_dir()]
+        if not asset_list:
+            _p("No assets found.")
+            return
+        if HAS_RICH:
+            t = Table(title=f"Asset Library ({len(asset_list)})", header_style="bold cyan")
+            t.add_column("Name"); t.add_column("Engines"); t.add_column("Exported")
+            for a in sorted(asset_list):
+                engines = [e for e in ["unreal", "unity", "godot"] if (a / e).exists()]
+                has_fbx = "fbx" if (a / "exports" / f"{a.name}.fbx").exists() else ""
+                has_glb = "glb" if (a / "exports" / f"{a.name}.glb").exists() else ""
+                t.add_row(a.name, " ".join(engines) or "—",
+                          ", ".join(filter(None, [has_fbx, has_glb])) or "script only")
+            _console.print(t)
+        else:
+            for a in sorted(asset_list):
+                print(f"  {a.name}/")
 
     def _cmd_clear(self, _):
         self._memory.short.clear()

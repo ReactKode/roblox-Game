@@ -26,6 +26,8 @@ Examples:
     parser.add_argument("--chat", metavar="MSG", help="Single message (non-interactive)")
     parser.add_argument("--learn", metavar="TOPIC", help="Learn a skill and exit")
     parser.add_argument("--project", metavar="GOAL", help="Run full Hive pipeline for a project goal")
+    parser.add_argument("--asset", metavar="DESC", help="Create 3D asset: Blender script → engine importers")
+    parser.add_argument("--engines", metavar="LIST", help="Comma-separated engines for --asset: unreal,unity,godot")
     parser.add_argument("--status", action="store_true", help="Print status JSON and exit")
     parser.add_argument("--skills", action="store_true", help="List learned skills")
     parser.add_argument("--profile", action="store_true", help="Show agent self-model profile")
@@ -74,6 +76,12 @@ Examples:
             for role_id, deliv in project.deliverables.items():
                 if not role_id.startswith("_"):
                     print(f"  ✓ {deliv.title} ({deliv.word_count} words)")
+        elif args.asset:
+            engines = [e.strip() for e in args.engines.split(",")] if args.engines else None
+            pkgs = agent.create_assets(args.asset, engines)
+            for pkg in pkgs:
+                print(f"  ✓ {pkg.asset_name}: script={pkg.script_path.name}, "
+                      f"exports={len(pkg.files)} files")
         elif args.chat:
             agent._verbose = args.verbose
             response = agent.chat(args.chat)
