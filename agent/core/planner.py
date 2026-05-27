@@ -1,5 +1,31 @@
-"""Task planner - decomposes complex tasks into subtasks."""
+"""Task planner — decomposes complex goals into ordered subtasks."""
+import json
+import re
 from dataclasses import dataclass, field
+
+COMPLEXITY_SIGNALS = [
+    "build", "create a full", "develop", "start a", "make a complete",
+    "and then", "after that", "step by step", "from scratch", "entire",
+    "launch", "deploy", "implement", "design and", "research and",
+]
+
+DECOMPOSE_PROMPT = """Break this complex task into a clear, ordered list of subtasks.
+
+Task: {task}
+Available tools: {tools}
+
+Rules:
+- 3 to 7 subtasks maximum
+- Each subtask is ONE specific, actionable step
+- List only direct dependencies (which step must complete first)
+- Keep descriptions under 20 words
+
+Output ONLY a JSON array:
+[
+  {{"id": 1, "description": "...", "depends_on": []}},
+  {{"id": 2, "description": "...", "depends_on": [1]}},
+  {{"id": 3, "description": "...", "depends_on": [1, 2]}}
+]"""
 
 
 @dataclass
@@ -11,58 +37,48 @@ class SubTask:
     result: str = ""
 
 
-PLAN_PROMPT = """Break down the following complex task into a series of clear, ordered subtasks.
-
-Task: {task}
-
-Available tools: {tools}
-
-Rules:
-- Create 3-7 subtasks maximum
-- Each subtask should be a single actionable step
-- List dependencies between tasks
-- Think about what information is needed before taking actions
-
-Respond as JSON array:
-[
-  {{"id": 1, "description": "First step", "depends_on": []}},
-  {{"id": 2, "description": "Second step", "depends_on": [1]}},
-  ...
-]
-
-Only output the JSON array, nothing else."""
-
-
 class TaskPlanner:
     def __init__(self, model_client=None):
         self._model = model_client
 
-    def set_model(self, model_client):
-        self._model = model_client
+    def set_model(self, m):
+        self._model = m
 
-    def decompose(self, task: str, available_tools: list[str] = None) -> list[SubTask]:
+    def is_complex(self, task: str) -> bool:
+        t = task.lower()
+        word_count = len(task.split())
+        signal_match = sum(1 for s in COMPLEXITY_SIGNALS if s in t)
+        return word_count > 25 or signal_match >= 2
+
+    def decompose(self, task: str, tools: list[str] = None) -> list[SubTask]:
         if not self._model:
             return [SubTask(id=1, description=task)]
 
-        tools_str = ", ".join(available_tools or [])
-        prompt = PLAN_PROMPT.format(task=task, tools=tools_str)
+        prompt = DECOMPOSE_PROMPT.format(
+            task=task,
+            tools=", ".join(tools or []),
+        )
         try:
             response = self._model.chat([
-                {"role": "system", "content": "You are a precise task planner. Output only valid JSON."},
+                {"role": "system", "content": "You are a precise task planner. Output only valid JSON array."},
                 {"role": "user", "content": prompt},
             ])
-            import json, re
-            json_match = re.search(r"\[.*\]", response, re.DOTALL)
-            if json_match:
-                items = json.loads(json_match.group())
+            # Extract JSON array
+            m = re.search(r"\[.*\]", response, re.DOTALL)
+            if m:
+                items = json.loads(m.group())
                 return [
-                    SubTask(id=item["id"], description=item["description"], depends_on=item.get("depends_on", []))
+                    SubTask(
+                        id=item["id"],
+                        description=item["description"],
+                        depends_on=item.get("depends_on", []),
+                    )
                     for item in items
                 ]
         except Exception:
             pass
         return [SubTask(id=1, description=task)]
 
-    def get_ready_tasks(self, tasks: list[SubTask]) -> list[SubTask]:
-        completed_ids = {t.id for t in tasks if t.completed}
-        return [t for t in tasks if not t.completed and all(dep in completed_ids for dep in t.depends_on)]
+    def ready_tasks(self, tasks: list[SubTask]) -> list[SubTask]:
+        done_ids = {t.id for t in tasks if t.completed}
+        return [t for t in tasks if not t.completed and all(d in done_ids for d in t.depends_on)]

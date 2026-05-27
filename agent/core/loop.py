@@ -1,174 +1,257 @@
-"""ReAct agent loop - Think → Act → Observe → Repeat."""
+"""ReAct agent loop with structured-output retry, reflection, and self-model integration."""
 import json
 import re
 from datetime import datetime
 
 
-SYSTEM_PROMPT = """You are NexusAgent, a powerful self-learning AI agent running locally.
-You have access to memory, tools, and a growing library of learned skills.
+# ── System prompt ────────────────────────────────────────────────────────────
 
-Current date: {date}
-Available tools: {tools}
-Learned skills: {skills}
+SYSTEM_PROMPT = """\
+You are NexusAgent — a self-improving AI agent with persistent memory and a growing skill library.
 
-Recent relevant memories:
+━━━ SELF-KNOWLEDGE ━━━
+{self_context}
+
+━━━ LEARNED SKILLS ━━━
+{skills}
+
+━━━ RELEVANT MEMORIES ━━━
 {memories}
 
-## How to respond:
+━━━ PAST EXPERIENCE WITH SIMILAR TASKS ━━━
+{reflections}
 
-Think step-by-step. You have two response modes:
+━━━ DATE ━━━
+{date}
 
-1. **Use a tool** - respond with ONLY this JSON (nothing else):
-{{"tool": "tool_name", "args": {{"arg1": "value1"}}}}
+━━━ AVAILABLE TOOLS ━━━
+{tool_descriptions}
 
-2. **Final answer** - when you have enough information, respond with:
-{{"final_answer": "Your complete answer here"}}
+━━━ INSTRUCTIONS ━━━
+Think step by step. Use tools to gather real information — never guess or make up facts.
 
-Rules:
-- Always think about what information you need before acting
-- Use web_search and web_scrape to research things you don't know
-- Use learn_skill when asked to learn a new technology or technique
-- Use recall_skill before trying to learn something (might already know it)
-- Use remember to store important findings for future use
-- Never make up information - research it
-- Maximum {max_iter} tool calls before giving a final answer
+YOUR RESPONSE MUST BE VALID JSON IN EXACTLY ONE OF THESE TWO FORMS:
+
+  Use a tool:      {{"tool": "TOOL_NAME", "args": {{"param": "value"}}}}
+  Final answer:    {{"final_answer": "Your complete, well-structured answer"}}
+
+STRATEGY:
+• recall_skill first if the task involves a domain you may know
+• web_search + web_scrape before answering factual or technical questions
+• learn_skill when encountering a new technology or technique
+• remember to store important findings for future tasks
+• Break complex goals into logical sub-steps using your tools
+• Give a thorough, complete final_answer — not just "done"
+
+Maximum {max_iter} tool calls. Budget wisely.\
 """
+
+CORRECTION_MSG = (
+    "Your last response was not valid JSON. You MUST output ONLY one of:\n"
+    '  {"tool": "tool_name", "args": {"key": "value"}}\n'
+    '  {"final_answer": "your complete answer"}\n'
+    "No markdown, no explanation before or after. Output the JSON object only."
+)
 
 
 class AgentLoop:
-    def __init__(self, model, tool_registry, memory_manager, skill_registry, max_iterations: int = 10):
+    def __init__(self, model, tool_registry, memory_manager,
+                 skill_registry, reflector=None, self_model=None,
+                 max_iterations: int = 12):
         self._model = model
         self._tools = tool_registry
         self._memory = memory_manager
         self._skills = skill_registry
+        self._reflector = reflector
+        self._self_model = self_model
         self.max_iterations = max_iterations
 
-    def run(self, task: str, verbose: bool = False) -> str:
-        skills_summary = self._get_skills_summary()
-        memories = self._get_relevant_memories(task)
-        system = SYSTEM_PROMPT.format(
-            date=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
-            tools=", ".join(self._tools.names()),
-            skills=skills_summary,
-            memories=memories,
-            max_iter=self.max_iterations,
-        )
+    # ── public ───────────────────────────────────────────────────────────────
 
+    def run(self, task: str, verbose: bool = False) -> str:
+        system = self._build_system_prompt(task)
         messages = [{"role": "system", "content": system}]
         messages.extend(self._memory.short.get_messages(include_system=False))
         messages.append({"role": "user", "content": task})
 
         tool_schemas = self._tools.get_schemas()
         iterations = 0
+        tools_used: list[str] = []
         final_answer = ""
-        used_tools = []
+        success = True
 
         while iterations < self.max_iterations:
             iterations += 1
-            response = self._model.chat(messages, tools=tool_schemas)
+
+            response, action = self._chat_with_retry(messages, tool_schemas)
 
             if verbose:
-                print(f"  [Loop {iterations}] Raw: {response[:200]}")
-
-            # Parse response
-            action = self._parse_action(response)
+                print(f"  [iter {iterations}] {str(action)[:120]}")
 
             if action is None:
-                # Plain text response - treat as final answer
+                # Gave up retrying — treat raw text as answer
                 final_answer = response
                 break
 
             if "final_answer" in action:
-                final_answer = action["final_answer"]
+                final_answer = str(action["final_answer"])
                 break
 
-            if "tool" in action:
-                tool_name = action["tool"]
-                args = action.get("args", {})
-                used_tools.append(tool_name)
+            # Handle both {"tool": ..., "args": ...} and OpenAI tool_calls format
+            calls = self._extract_tool_calls(action)
+            if not calls:
+                final_answer = response
+                break
+
+            for tool_name, args in calls:
+                tools_used.append(tool_name)
                 observation = self._tools.execute(tool_name, args)
                 if verbose:
-                    print(f"  [Tool: {tool_name}] -> {observation[:150]}")
+                    print(f"  [tool:{tool_name}] → {observation[:100]}")
                 messages.append({"role": "assistant", "content": response})
-                messages.append({"role": "user", "content": f"Tool '{tool_name}' result:\n{observation}"})
-                continue
-
-            if "tool_calls" in action:
-                # Handle OpenAI-style tool_calls format
-                for tc in action["tool_calls"]:
-                    fn = tc.get("function", {})
-                    tool_name = fn.get("name", "")
-                    try:
-                        args = json.loads(fn.get("arguments", "{}"))
-                    except Exception:
-                        args = {}
-                    used_tools.append(tool_name)
-                    observation = self._tools.execute(tool_name, args)
-                    if verbose:
-                        print(f"  [Tool: {tool_name}] -> {observation[:150]}")
-                    messages.append({"role": "assistant", "content": response})
-                    messages.append({"role": "user", "content": f"Tool '{tool_name}' result:\n{observation}"})
-                continue
-
-            final_answer = response
-            break
+                messages.append({"role": "user",
+                                  "content": f"Tool '{tool_name}' returned:\n{observation}"})
 
         if not final_answer:
-            final_answer = f"Reached maximum iterations ({self.max_iterations}) without a final answer. Last response: {response[:500]}"
+            final_answer = f"Reached {self.max_iterations} steps without completing. Last response: {response[:400]}"
+            success = False
 
-        self._memory.episodic.log(
-            task=task[:500],
-            action=", ".join(used_tools),
-            observation=f"Completed in {iterations} iterations",
-            outcome=final_answer[:500],
-            success=True,
-        )
+        # Post-task: reflect and update self-model
+        self._post_task(task, tools_used, final_answer, success, iterations)
 
         return final_answer
 
-    def _parse_action(self, response: str) -> dict | None:
-        response = response.strip()
+    # ── internals ────────────────────────────────────────────────────────────
 
-        # Try direct JSON parse
-        try:
-            obj = json.loads(response)
-            if isinstance(obj, dict):
-                return obj
-        except json.JSONDecodeError:
-            pass
+    def _chat_with_retry(self, messages: list[dict], tools: list[dict],
+                          max_retries: int = 3) -> tuple[str, dict | None]:
+        working = list(messages)
+        for attempt in range(max_retries):
+            response = self._model.chat(working, tools)
+            action = _parse_action(response)
+            if action is not None:
+                return response, action
+            if attempt < max_retries - 1:
+                working = working + [
+                    {"role": "assistant", "content": response},
+                    {"role": "user", "content": CORRECTION_MSG},
+                ]
+        # All retries exhausted — return raw text with None action
+        return response, None
 
-        # Extract JSON block
-        json_patterns = [
-            r"```json\s*(\{.*?\})\s*```",
-            r"```\s*(\{.*?\})\s*```",
-            r"(\{[^{}]*\"(?:tool|final_answer|tool_calls)\"[^{}]*\})",
-        ]
-        for pattern in json_patterns:
-            match = re.search(pattern, response, re.DOTALL)
-            if match:
+    def _extract_tool_calls(self, action: dict) -> list[tuple[str, dict]]:
+        """Normalize both {tool/args} and OpenAI {tool_calls} formats."""
+        if "tool" in action:
+            return [(action["tool"], action.get("args", {}))]
+        if "tool_calls" in action:
+            calls = []
+            for tc in action["tool_calls"]:
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
                 try:
-                    return json.loads(match.group(1))
-                except json.JSONDecodeError:
-                    continue
+                    args = json.loads(fn.get("arguments", "{}"))
+                except Exception:
+                    args = {}
+                if name:
+                    calls.append((name, args))
+            return calls
+        return []
 
-        # Check for tool_calls JSON (from model responses)
-        if '"tool_calls"' in response:
+    def _post_task(self, task: str, tools_used: list, answer: str,
+                   success: bool, iterations: int):
+        # Log to episodic memory
+        self._memory.episodic.log(
+            task=task[:500],
+            action=", ".join(tools_used) or "direct_answer",
+            observation=f"{iterations} iterations",
+            outcome=answer[:500],
+            success=success,
+        )
+
+        # Reflexion
+        if self._reflector:
+            reflection = self._reflector.reflect(task, tools_used, answer, success, iterations)
+            if reflection and self._self_model:
+                self._self_model.apply_reflection(
+                    reflection.lesson,
+                    reflection.what_failed,
+                    reflection.skill_domain,
+                    reflection.confidence,
+                )
+
+        # Update self-model task stats
+        if self._self_model:
+            domain = "general"
+            if tools_used:
+                learn_calls = [t for t in tools_used if t == "learn_skill"]
+                if learn_calls:
+                    domain = "skill_learning"
+            self._self_model.record_task(success, iterations, domain)
+
+    def _build_system_prompt(self, task: str) -> str:
+        skills = self._skills.list_all()
+        if skills:
+            skill_lines = []
+            for s in skills[:12]:
+                conf = s.get("confidence", 0.5)
+                conf_label = "✓" if conf >= 0.7 else "~" if conf >= 0.5 else "?"
+                skill_lines.append(f"  [{conf_label}] {s['name']} ({s['domain']}) — {s['description'][:60]}")
+            skills_str = "\n".join(skill_lines)
+        else:
+            skills_str = "  None learned yet — use learn_skill to build your library"
+
+        # Tool descriptions (one line each)
+        tool_desc_lines = []
+        for schema in self._tools.get_schemas():
+            fn = schema["function"]
+            params = list(fn.get("parameters", {}).get("properties", {}).keys())
+            tool_desc_lines.append(f"  {fn['name']}({', '.join(params)}) — {fn['description']}")
+        tools_str = "\n".join(tool_desc_lines)
+
+        memories = self._memory.get_relevant_context(task, k=4)
+        reflections = "\n".join(f"  • {r}" for r in self._memory.recall_reflections(task, 3)) or "  None yet"
+        self_ctx = self._self_model.get_prompt_context() if self._self_model else "New agent — no history yet"
+
+        return SYSTEM_PROMPT.format(
+            self_context=self_ctx,
+            skills=skills_str,
+            memories=memories,
+            reflections=reflections,
+            date=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+            tool_descriptions=tools_str,
+            max_iter=self.max_iterations,
+        )
+
+
+# ── JSON parsing ─────────────────────────────────────────────────────────────
+
+def _parse_action(text: str) -> dict | None:
+    text = text.strip()
+
+    # Direct parse
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+
+    # Extract from markdown code block
+    for pattern in [r"```json\s*(\{.*?\})\s*```", r"```\s*(\{.*?\})\s*```"]:
+        m = re.search(pattern, text, re.DOTALL)
+        if m:
             try:
-                start = response.index("{")
-                return json.loads(response[start:])
-            except Exception:
+                return json.loads(m.group(1))
+            except json.JSONDecodeError:
                 pass
 
-        return None
+    # Grab first {...} that contains a known key
+    for m in re.finditer(r"\{[^{}]{10,}\}", text, re.DOTALL):
+        try:
+            obj = json.loads(m.group())
+            if any(k in obj for k in ("tool", "final_answer", "tool_calls")):
+                return obj
+        except json.JSONDecodeError:
+            continue
 
-    def _get_skills_summary(self) -> str:
-        skills = self._skills.list_all()
-        if not skills:
-            return "None learned yet"
-        return ", ".join(f"{s['name']}({s['domain']})" for s in skills[:10])
-
-    def _get_relevant_memories(self, query: str) -> str:
-        results = self._memory.recall(query, k=3)
-        if not results:
-            return "None"
-        return "\n".join(f"- {r['text'][:200]}" for r in results)
+    return None

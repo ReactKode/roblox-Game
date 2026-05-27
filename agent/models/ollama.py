@@ -1,11 +1,12 @@
-"""Ollama local model client."""
+"""Ollama local model client with JSON-mode support."""
 import json
 import requests
 from .base import ModelClient
 
 
 class OllamaClient(ModelClient):
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3.2", embed_model: str = "nomic-embed-text"):
+    def __init__(self, base_url: str = "http://localhost:11434",
+                 model: str = "llama3.2", embed_model: str = "nomic-embed-text"):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.embed_model = embed_model
@@ -17,31 +18,40 @@ class OllamaClient(ModelClient):
         except Exception:
             return False
 
-    def chat(self, messages: list[dict], tools: list[dict] | None = None) -> str:
-        payload = {"model": self.model, "messages": messages, "stream": False}
+    def chat(self, messages: list[dict], tools: list[dict] | None = None,
+             force_json: bool = False) -> str:
+        payload: dict = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+        }
         if tools:
             payload["tools"] = tools
+        # Enable JSON grammar mode when tools are active — forces valid JSON output
+        # so the ReAct loop never fails to parse.
+        if tools or force_json:
+            payload["format"] = "json"
+
         try:
-            r = requests.post(f"{self.base_url}/api/chat", json=payload, timeout=120)
+            r = requests.post(f"{self.base_url}/api/chat", json=payload, timeout=180)
             r.raise_for_status()
             data = r.json()
             msg = data.get("message", {})
-            # Handle tool_calls returned by Ollama
+            # Ollama native tool calls
             if msg.get("tool_calls"):
                 return json.dumps({"tool_calls": msg["tool_calls"]})
             return msg.get("content", "")
         except requests.exceptions.Timeout:
-            return "Error: Ollama request timed out."
+            return '{"final_answer": "Error: Ollama request timed out."}'
         except Exception as e:
-            return f"Error: Ollama chat failed - {e}"
+            return f'{{"final_answer": "Error: Ollama error — {e}"}}'
 
     def embed(self, text: str) -> list[float]:
         payload = {"model": self.embed_model, "input": text}
         try:
             r = requests.post(f"{self.base_url}/api/embed", json=payload, timeout=30)
             r.raise_for_status()
-            data = r.json()
-            embeddings = data.get("embeddings", [[]])
+            embeddings = r.json().get("embeddings", [[]])
             return embeddings[0] if embeddings else []
         except Exception:
             return []

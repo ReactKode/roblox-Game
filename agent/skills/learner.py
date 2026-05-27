@@ -1,174 +1,286 @@
-"""Autonomous skill learner - researches and stores new skills."""
+"""Autonomous skill learner — multi-pass research, synthesis, and validation."""
 from datetime import datetime
 from ..tools import web_search, web_scrape
 
 
-LEARN_PROMPT = """You are an expert AI trainer. Analyze the following documentation and research about "{topic}" and create a structured skill guide.
+SYNTHESIZE_PROMPT = """You are an expert technical trainer. Analyze this research about "{topic}" and create a high-quality, actionable skill guide.
 
-Research content:
+Research (from {source_count} sources):
 {content}
 
-Create a comprehensive skill guide with:
-1. PROCEDURE: Step-by-step instructions for using this skill (numbered list, clear and actionable)
-2. CODE_TEMPLATE: A practical Python/script code template demonstrating this skill (if applicable)
-3. KEY_CONCEPTS: The 5 most important concepts to understand
-4. TIPS: 3-5 pro tips and best practices
-5. TOOLS_REQUIRED: List of tools, software, or libraries needed
+Create a comprehensive skill guide. Output ONLY this JSON:
+{{
+  "description": "one sentence describing what this skill enables",
+  "procedure": "NUMBERED STEP-BY-STEP PROCEDURE:\\n1. Install...\\n2. Open...\\n3. ...",
+  "code_template": "# working code template here or N/A",
+  "key_concepts": ["concept1", "concept2", "concept3"],
+  "tips": ["tip1", "tip2", "tip3"],
+  "tools_required": ["tool1", "tool2"],
+  "tags": ["tag1", "tag2", "tag3"]
+}}
 
-Format your response EXACTLY as:
----PROCEDURE---
-<numbered steps>
----CODE_TEMPLATE---
-<code or "N/A">
----KEY_CONCEPTS---
-<comma-separated list>
----TIPS---
-<bullet points>
----TOOLS_REQUIRED---
-<comma-separated list>
+Rules:
+- Procedure must have at least 6 numbered steps
+- Code template must be real, runnable code (not pseudocode)
+- Tips must be specific and actionable, not generic
+- If no code applies, set code_template to "N/A"
 """
+
+RESEARCH_QUERIES = {
+    "blender":       ["{topic} Python bpy API tutorial", "{topic} Blender scripting documentation"],
+    "unity":         ["{topic} Unity C# tutorial", "{topic} Unity3D documentation example"],
+    "godot":         ["{topic} Godot GDScript tutorial", "{topic} Godot 4 documentation"],
+    "unreal_engine": ["{topic} Unreal Engine 5 tutorial", "{topic} UE5 blueprint documentation"],
+    "python":        ["{topic} Python tutorial", "{topic} Python documentation examples"],
+    "machine_learning": ["{topic} machine learning tutorial code", "{topic} PyTorch TensorFlow example"],
+    "business":      ["{topic} business strategy guide", "{topic} startup best practices"],
+}
 
 
 class SkillLearner:
-    def __init__(self, registry, tool_registry=None, model_client=None):
+    def __init__(self, registry, validator=None, model_client=None, memory_manager=None):
         self._registry = registry
-        self._tools = tool_registry
+        self._validator = validator
         self._model = model_client
+        self._memory = memory_manager
 
-    def set_model(self, model_client):
-        self._model = model_client
+    def set_model(self, model):
+        self._model = model
+        if self._validator:
+            self._validator.set_model(model)
 
-    def learn(self, topic: str, domain: str = "auto") -> dict:
+    def learn(self, topic: str, domain: str = "auto", force: bool = False) -> dict:
         if domain == "auto" or not domain:
             domain = self._registry.detect_domain(topic)
 
-        existing = self._registry.search(topic, domain)
-        if existing and existing[0]["name"].lower() == topic.lower():
-            self._registry.update_usage(existing[0]["name"])
-            return existing[0]
+        # Return existing skill if confident enough (don't waste resources)
+        if not force:
+            existing = self._registry.search(topic, domain)
+            if existing:
+                best = existing[0]
+                if best["name"].lower() == topic.lower() and best.get("confidence", 0) >= 0.7:
+                    self._registry.update_usage(best["name"])
+                    return best
 
-        content = self._research(topic)
-        skill = self._synthesize(topic, domain, content)
-        return self._registry.register(skill)
+        # Multi-pass research
+        research_content, source_count = self._research(topic, domain)
 
-    def _research(self, topic: str) -> str:
-        """Search and scrape documentation for topic."""
-        queries = [
+        # Synthesize skill from research
+        skill_data = self._synthesize(topic, domain, research_content, source_count)
+
+        # Register first (gives it a proper path)
+        skill = self._registry.register(skill_data)
+
+        # Validate and update confidence
+        if self._validator:
+            confidence, issues = self._validator.validate(skill)
+            self._registry.update_confidence(skill["name"], confidence, issues)
+            skill["confidence"] = confidence
+            skill["validation_issues"] = issues
+        else:
+            skill["confidence"] = 0.55  # unvalidated default
+
+        # Store research findings in semantic memory
+        if self._memory and research_content:
+            self._memory.store_research(
+                f"Research on {topic}: {research_content[:600]}",
+                source=f"skill_learning/{domain}",
+            )
+
+        return skill
+
+    def _research(self, topic: str, domain: str) -> tuple[str, int]:
+        """Search and scrape from multiple sources. Returns (content, source_count)."""
+        queries = RESEARCH_QUERIES.get(domain, [
             f"{topic} tutorial documentation how to",
-            f"{topic} Python API example code",
-            f"{topic} getting started guide",
-        ]
+            f"{topic} complete guide examples",
+        ])
+        queries = [q.format(topic=topic) for q in queries[:2]]
+        # Add a general query
+        queries.append(f"{topic} best practices tips")
+
         collected = []
-        for query in queries[:2]:
-            results = web_search.search(query, max_results=3)
-            for r in results[:2]:
-                snippet = r.get("snippet", "")
-                if snippet:
-                    collected.append(f"Source: {r['title']}\n{snippet}")
+        urls_scraped = set()
+
+        for query in queries[:3]:
+            results = web_search.search(query, max_results=4)
+            for r in results[:3]:
+                snippet = r.get("snippet", "").strip()
                 url = r.get("url", "")
-                if url and len(collected) < 6:
-                    page_content = web_scrape.scrape(url, max_chars=3000)
-                    if page_content and not page_content.startswith("Error"):
-                        collected.append(f"From {r['title']}:\n{page_content}")
-                    if len(collected) >= 4:
-                        break
+                title = r.get("title", "")
 
-        return "\n\n===\n\n".join(collected[:4]) if collected else f"No documentation found for '{topic}'."
+                if snippet and len(snippet) > 30:
+                    collected.append(f"[{title}]\n{snippet}")
 
-    def _synthesize(self, topic: str, domain: str, research_content: str) -> dict:
-        """Use LLM to synthesize skill from research, or use template if no model."""
-        procedure = ""
-        code_template = ""
-        key_concepts = []
-        tips = ""
-        tools_required = []
+                if url and url not in urls_scraped and len(collected) < 8:
+                    page = web_scrape.scrape(url, max_chars=2500)
+                    if page and not page.startswith("Error") and len(page) > 100:
+                        collected.append(f"[Full page: {title}]\n{page}")
+                        urls_scraped.add(url)
 
+            if len(collected) >= 6:
+                break
+
+        content = "\n\n---\n\n".join(collected[:6]) if collected else f"No research found for '{topic}'."
+        return content, len(urls_scraped)
+
+    def _synthesize(self, topic: str, domain: str, content: str, source_count: int) -> dict:
+        """Use LLM to create structured skill from research content."""
         if self._model:
-            prompt = LEARN_PROMPT.format(topic=topic, content=research_content[:6000])
-            response = self._model.chat([
-                {"role": "system", "content": "You are an expert technical trainer creating concise skill guides."},
-                {"role": "user", "content": prompt},
-            ])
-            procedure, code_template, key_concepts, tips, tools_required = self._parse_response(response)
+            return self._llm_synthesize(topic, domain, content, source_count)
+        return self._template_skill(topic, domain, content)
 
-        if not procedure:
-            procedure = self._template_procedure(topic, domain, research_content)
-            code_template = self._template_code(topic, domain)
+    def _llm_synthesize(self, topic: str, domain: str, content: str, source_count: int) -> dict:
+        import json, re
+        prompt = SYNTHESIZE_PROMPT.format(
+            topic=topic,
+            source_count=max(source_count, 1),
+            content=content[:6000],
+        )
+        response = self._model.chat([
+            {"role": "system", "content": "You are an expert technical trainer creating skill guides. Output only valid JSON."},
+            {"role": "user", "content": prompt},
+        ])
 
+        # Parse JSON from response
+        data = None
+        try:
+            data = json.loads(response.strip())
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", response, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group())
+                except json.JSONDecodeError:
+                    pass
+
+        if not data:
+            return self._template_skill(topic, domain, content)
+
+        return {
+            "name": topic,
+            "description": data.get("description", f"Skills and techniques for {topic}"),
+            "domain": domain,
+            "procedure": data.get("procedure", self._template_procedure(topic, content)),
+            "code_template": data.get("code_template", self._template_code(domain)),
+            "tools_required": data.get("tools_required", []),
+            "tags": data.get("key_concepts", [])[:6] + data.get("tags", [])[:3],
+            "metadata": {
+                "source": "llm_synthesized",
+                "sources_researched": source_count,
+                "synthesized_at": datetime.utcnow().isoformat(),
+            },
+        }
+
+    def _template_skill(self, topic: str, domain: str, content: str) -> dict:
+        """Fallback when no LLM available."""
         return {
             "name": topic,
             "description": f"Skills and techniques for {topic}",
             "domain": domain,
-            "version": "1.0.0",
-            "created_at": datetime.utcnow().isoformat(),
-            "last_used": datetime.utcnow().isoformat(),
-            "use_count": 1,
-            "procedure": procedure,
-            "code_template": code_template,
-            "tools_required": tools_required if isinstance(tools_required, list) else [tools_required],
-            "examples": [],
-            "tags": key_concepts[:5] if isinstance(key_concepts, list) else [],
-            "metadata": {"source": "autonomous_research", "research_chars": len(research_content)},
-        }
-
-    def _parse_response(self, response: str) -> tuple:
-        sections = {
-            "procedure": "",
-            "code_template": "",
-            "key_concepts": [],
-            "tips": "",
+            "procedure": self._template_procedure(topic, content),
+            "code_template": self._template_code(domain),
             "tools_required": [],
+            "tags": [domain, topic.split()[0].lower()],
+            "metadata": {"source": "template_fallback"},
         }
-        current = None
-        lines = []
-        for line in response.splitlines():
-            if "---PROCEDURE---" in line:
-                current = "procedure"; lines = []
-            elif "---CODE_TEMPLATE---" in line:
-                sections["procedure"] = "\n".join(lines).strip(); current = "code_template"; lines = []
-            elif "---KEY_CONCEPTS---" in line:
-                sections["code_template"] = "\n".join(lines).strip(); current = "key_concepts"; lines = []
-            elif "---TIPS---" in line:
-                sections["key_concepts"] = [c.strip() for c in "\n".join(lines).split(",") if c.strip()]
-                current = "tips"; lines = []
-            elif "---TOOLS_REQUIRED---" in line:
-                sections["tips"] = "\n".join(lines).strip(); current = "tools_required"; lines = []
-            elif current:
-                lines.append(line)
-        if current == "tools_required":
-            sections["tools_required"] = [t.strip() for t in "\n".join(lines).split(",") if t.strip()]
 
-        return (
-            sections["procedure"],
-            sections["code_template"],
-            sections["key_concepts"],
-            sections["tips"],
-            sections["tools_required"],
-        )
-
-    def _template_procedure(self, topic: str, domain: str, research: str) -> str:
-        lines = [f"# How to use: {topic}", ""]
-        lines.append("## Getting Started")
-        lines.append(f"1. Install and set up {topic}")
-        lines.append(f"2. Learn the basic interface and concepts of {topic}")
-        lines.append(f"3. Follow official documentation at the project's website")
+    def _template_procedure(self, topic: str, research: str) -> str:
+        lines = [f"# How to work with: {topic}", ""]
+        lines.append("## Setup")
+        lines.append(f"1. Install required dependencies for {topic}")
+        lines.append(f"2. Read the official documentation")
         lines.append("")
-        lines.append("## Key Steps")
-        research_lines = [l for l in research.splitlines() if len(l.strip()) > 30][:10]
-        for i, l in enumerate(research_lines, 4):
-            lines.append(f"{i}. {l.strip()[:200]}")
+        lines.append("## Core Steps (from research)")
+        research_lines = [l.strip() for l in research.splitlines() if len(l.strip()) > 40][:8]
+        for i, l in enumerate(research_lines, 3):
+            lines.append(f"{i}. {l[:200]}")
         lines.append("")
         lines.append("## Best Practices")
-        lines.append(f"- Read the official {topic} documentation")
-        lines.append(f"- Start with small projects to build familiarity")
-        lines.append(f"- Join the {domain} community for support")
+        lines.append(f"- Start with small examples to build understanding")
+        lines.append(f"- Refer to official {topic} documentation for edge cases")
+        lines.append(f"- Join community forums for advanced help")
         return "\n".join(lines)
 
-    def _template_code(self, topic: str, domain: str) -> str:
+    def _template_code(self, domain: str) -> str:
         templates = {
-            "blender": '"""Blender Python (bpy) template"""\nimport bpy\n\n# Clear scene\nbpy.ops.object.select_all(action="SELECT")\nbpy.ops.object.delete()\n\n# Add a mesh\nbpy.ops.mesh.primitive_cube_add(location=(0, 0, 0))\nobj = bpy.context.active_object\nobj.name = "MyMesh"\nprint(f"Created: {obj.name}")',
-            "unity": '// Unity C# MonoBehaviour template\nusing UnityEngine;\n\npublic class MyScript : MonoBehaviour\n{\n    void Start() {\n        Debug.Log("NexusAgent Unity skill loaded");\n    }\n    void Update() {\n        // Called every frame\n    }\n}',
-            "godot": '# Godot GDScript template\nextends Node\n\nfunc _ready():\n    print("NexusAgent Godot skill loaded")\n\nfunc _process(delta):\n    pass  # Called every frame',
-            "python": '"""Python skill template"""\ndef main():\n    print("NexusAgent Python skill")\n\nif __name__ == "__main__":\n    main()',
+            "blender": (
+                '"""Blender Python (bpy) — run inside Blender Script Editor"""\n'
+                "import bpy\n\n"
+                "# Clear default objects\n"
+                "bpy.ops.object.select_all(action='SELECT')\n"
+                "bpy.ops.object.delete()\n\n"
+                "# Add a mesh object\n"
+                "bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))\n"
+                "obj = bpy.context.active_object\n"
+                "obj.name = 'NexusObject'\n\n"
+                "# Apply a material\n"
+                "mat = bpy.data.materials.new(name='NexusMaterial')\n"
+                "mat.use_nodes = True\n"
+                "obj.data.materials.append(mat)\n"
+                "print(f'Created {obj.name} with material {mat.name}')"
+            ),
+            "unity": (
+                "// Unity C# MonoBehaviour\n"
+                "using UnityEngine;\n\n"
+                "public class NexusController : MonoBehaviour\n"
+                "{\n"
+                "    [SerializeField] private float speed = 5f;\n"
+                "    private Rigidbody _rb;\n\n"
+                "    void Start() {\n"
+                "        _rb = GetComponent<Rigidbody>();\n"
+                "        Debug.Log(\"NexusAgent skill initialized\");\n"
+                "    }\n\n"
+                "    void Update() {\n"
+                "        float h = Input.GetAxis(\"Horizontal\");\n"
+                "        float v = Input.GetAxis(\"Vertical\");\n"
+                "        _rb.MovePosition(transform.position + new Vector3(h, 0, v) * speed * Time.deltaTime);\n"
+                "    }\n"
+                "}"
+            ),
+            "godot": (
+                "# Godot 4 GDScript\n"
+                "extends CharacterBody3D\n\n"
+                "const SPEED = 5.0\n"
+                "const JUMP_VELOCITY = 4.5\n\n"
+                "func _ready():\n"
+                '    print("NexusAgent Godot skill loaded")\n\n'
+                "func _physics_process(delta: float) -> void:\n"
+                "    if not is_on_floor():\n"
+                "        velocity += get_gravity() * delta\n"
+                "    var direction = Input.get_vector(\"ui_left\", \"ui_right\", \"ui_up\", \"ui_down\")\n"
+                "    velocity.x = direction.x * SPEED\n"
+                "    velocity.z = direction.y * SPEED\n"
+                "    move_and_slide()"
+            ),
+            "python": (
+                '"""Python skill template"""\n'
+                "import os\n"
+                "import json\n"
+                "from pathlib import Path\n\n\n"
+                "def process(data: dict) -> dict:\n"
+                '    """Process input data and return results."""\n'
+                "    results = {}\n"
+                "    for key, value in data.items():\n"
+                "        results[key] = str(value).upper()\n"
+                "    return results\n\n\n"
+                'if __name__ == "__main__":\n'
+                '    sample = {"input": "hello from NexusAgent"}\n'
+                "    print(json.dumps(process(sample), indent=2))"
+            ),
+            "machine_learning": (
+                '"""ML skill template using scikit-learn"""\n'
+                "from sklearn.ensemble import RandomForestClassifier\n"
+                "from sklearn.model_selection import train_test_split\n"
+                "from sklearn.metrics import accuracy_score\n"
+                "import numpy as np\n\n"
+                "# Generate sample data\n"
+                "X = np.random.rand(200, 4)\n"
+                "y = (X[:, 0] + X[:, 1] > 1).astype(int)\n\n"
+                "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)\n"
+                "model = RandomForestClassifier(n_estimators=100, random_state=42)\n"
+                "model.fit(X_train, y_train)\n"
+                "print(f'Accuracy: {accuracy_score(y_test, model.predict(X_test)):.2%}')"
+            ),
         }
-        return templates.get(domain, f'# {topic} - code template\n# TODO: implement specific code for {topic}')
+        return templates.get(domain, f"# {domain} code template\n# TODO: implement\nprint('NexusAgent skill')")

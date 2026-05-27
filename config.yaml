@@ -1,15 +1,16 @@
 agent:
   name: NexusAgent
-  version: "1.0.0"
+  version: "2.0.0"
   data_dir: "./data"
+  max_iterations: 12   # ReAct loop cap per task
 
 models:
-  # auto tries: ollama → lmstudio → openai → anthropic
+  # Tries in order: preferred → ollama → lmstudio → openai → anthropic
   preferred_backend: "auto"
   ollama:
     base_url: "http://localhost:11434"
-    model: "llama3.2"
-    embed_model: "nomic-embed-text"
+    model: "llama3.2"              # or: mistral, codellama, qwen2.5-coder, etc.
+    embed_model: "nomic-embed-text" # pull with: ollama pull nomic-embed-text
   lmstudio:
     base_url: "http://localhost:1234/v1"
     model: "local-model"
@@ -20,12 +21,11 @@ models:
 
 memory:
   short_term_limit: 20
-  long_term_backend: "chromadb"   # chromadb | json
-  consolidation_interval: 300      # seconds
+  long_term_backend: "auto"      # auto → tries chromadb first, falls back to json+tfidf
 
 heartbeat:
   enabled: true
-  interval: 300   # seconds between beats
+  interval: 300                  # seconds (5 minutes)
 
 tools:
   web_search_enabled: true
@@ -34,5 +34,4 @@ tools:
   max_search_results: 5
 
 skills:
-  auto_learn: true
   skill_dir: "./data/skills"
