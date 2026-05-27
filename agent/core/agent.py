@@ -19,6 +19,8 @@ from .loop import AgentLoop
 from .planner import TaskPlanner
 from .reflector import Reflector
 from .self_model import SelfModel
+from agent.hive.orchestrator import OrchestratorAgent
+from agent.hive.roles import ROLES
 
 try:
     from rich.console import Console
@@ -121,6 +123,16 @@ class NexusAgent:
         if hb_cfg.get("enabled", True):
             self._heartbeat.start()
 
+        # ── Hive ──────────────────────────────────────────────────────────
+        self._hive = OrchestratorAgent(
+            model_client=self._model,
+            tool_registry=self._tools,
+            skill_registry=self._skills,
+            memory_manager=self._memory,
+            data_dir=data_dir,
+        )
+        self._hive.set_print(self._hive_log)
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def chat(self, message: str) -> str:
@@ -148,6 +160,26 @@ class NexusAgent:
             f"Confidence: {conf:.0%} ({status}){issue_str}\n\n"
             f"Procedure preview:\n{skill['procedure'][:400]}..."
         )
+
+    def run_project(self, goal: str) -> "Project":
+        """Run the full Hive pipeline for a project goal."""
+        return self._hive.run_project(goal, parallel=False)  # parallel=True if model supports concurrent
+
+    def _hive_log(self, msg: str):
+        if HAS_RICH and _console:
+            # Style different log lines
+            if "[Orchestrator]" in msg:
+                _console.print(f"[bold magenta]{msg}[/bold magenta]")
+            elif "✓" in msg:
+                _console.print(f"[green]{msg}[/green]")
+            elif "✗" in msg or "Error" in msg:
+                _console.print(f"[red]{msg}[/red]")
+            elif "↺" in msg:
+                _console.print(f"[yellow]{msg}[/yellow]")
+            else:
+                _console.print(f"[cyan]{msg}[/cyan]")
+        else:
+            print(msg)
 
     def status(self) -> dict:
         mem = self._memory.stats()
@@ -253,6 +285,8 @@ class NexusAgent:
             "/quit": self._cmd_quit, "/exit": self._cmd_quit, "/q": self._cmd_quit,
             "/help": self._cmd_help,
             "/status": self._cmd_status,
+            "/project": self._cmd_project,
+            "/projects": self._cmd_projects,
             "/skills": self._cmd_skills,
             "/learn": self._cmd_learn,
             "/skill": self._cmd_skill,
@@ -278,28 +312,43 @@ class NexusAgent:
 
     def _cmd_help(self, _):
         text = """
-**NexusAgent Commands**
+**NexusAgent v2 Commands**
 
+**🧠 Solo Agent**
 | Command | Description |
 |---|---|
 | `/learn <topic>` | Research & learn a skill (Blender, Unity, Godot, Python...) |
 | `/skills` | List all learned skills with confidence scores |
 | `/skill <name>` | Show full skill details and code template |
-| `/status` | Full agent status |
-| `/profile` | Self-model: strengths, weaknesses, lessons |
+| `/profile` | Self-model: strengths, weaknesses, lessons learned |
 | `/memory` | Memory statistics |
 | `/episodes` | Recent action history |
+
+**🐝 Hive (Multi-Agent Team)**
+| Command | Description |
+|---|---|
+| `/project <goal>` | Spawn a full specialist team to build your project |
+| `/projects` | List all completed projects |
+
+**⚙️ System**
+| Command | Description |
+|---|---|
+| `/status` | Full agent status |
 | `/clear` | Clear short-term memory |
 | `/verbose` | Toggle verbose tool-call logging |
 | `/model` | Show active model backend |
 | `/quit` | Exit |
 
-**Examples:**
-- `How do I create a 3D mesh in Blender with Python?`
-- `/learn Godot 4 GDScript`
-- `Write a FastAPI server with authentication`
-- `Research the best ways to monetize a SaaS product`
-- `Build me a Python web scraper for job listings`
+**Solo examples:**
+- `How do I rig a character in Blender with Python?`
+- `/learn Godot 4 GDScript game mechanics`
+- `Write a FastAPI server with JWT authentication`
+
+**Hive examples:**
+- `/project build an AAA souls-like action RPG`
+- `/project build a mobile fitness tracking app`
+- `/project create a SaaS project management tool`
+- `/project build a developer CLI for database migrations`
 """
         if HAS_RICH:
             _console.print(Markdown(text))
@@ -434,6 +483,73 @@ class NexusAgent:
             print(f"Tasks: {s['tasks_completed']}✓ {s['tasks_failed']}✗ | Reflections: {s['reflections_stored']}")
             for l in p["lessons_learned"][-5:]:
                 print(f"  • {l}")
+
+    def _cmd_project(self, goal: str):
+        if not goal:
+            _p("Usage: /project <goal>\n"
+               "Examples:\n"
+               "  /project build an AAA open-world action RPG\n"
+               "  /project build a mobile fitness tracking app\n"
+               "  /project create a SaaS project management tool\n"
+               "  /project build a developer CLI tool for database migrations")
+            return
+        if HAS_RICH:
+            _console.rule("[bold magenta]NexusAgent Hive[/bold magenta]")
+            _console.print(f"[bold]Goal:[/bold] {goal}\n")
+        else:
+            print(f"\n{'='*60}\nNexusAgent Hive — {goal}\n{'='*60}")
+        try:
+            project = self.run_project(goal)
+            output_dir = self._data_dir / "projects" / project.name.lower().replace(" ", "_")[:40]
+            if HAS_RICH:
+                _console.rule("[bold green]Project Complete[/bold green]")
+                t = Table(title=f"🎯 {project.name}", header_style="bold cyan")
+                t.add_column("Role"); t.add_column("Deliverable"); t.add_column("Words"); t.add_column("Status")
+                for role_id, deliv in project.deliverables.items():
+                    if role_id.startswith("_"):
+                        continue
+                    role_cfg = ROLES.get(role_id)
+                    emoji = role_cfg.emoji if role_cfg else "•"
+                    t.add_row(f"{emoji} {role_cfg.title if role_cfg else role_id}",
+                              deliv.title[:45], str(deliv.word_count),
+                              "[green]✓[/green]" if deliv.approved else "[yellow]~[/yellow]")
+                _console.print(t)
+                _console.print(f"\n[dim]Saved to: {output_dir}[/dim]")
+            else:
+                print(f"\nProject '{project.name}' complete!")
+                for role_id, deliv in project.deliverables.items():
+                    if not role_id.startswith("_"):
+                        print(f"  ✓ {deliv.title} ({deliv.word_count} words)")
+                print(f"Saved to: {output_dir}")
+        except Exception as e:
+            _p(f"[red]Project failed: {e}[/red]" if HAS_RICH else f"Project failed: {e}")
+
+    def _cmd_projects(self, _):
+        projects_dir = self._data_dir / "projects"
+        if not projects_dir.exists():
+            _p("No projects built yet. Use /project <goal> to start one.")
+            return
+        projects = [p for p in projects_dir.iterdir() if p.is_dir()]
+        if not projects:
+            _p("No projects found.")
+            return
+        import json
+        if HAS_RICH:
+            t = Table(title=f"Projects ({len(projects)})", header_style="bold cyan")
+            t.add_column("Name"); t.add_column("Type"); t.add_column("Files")
+            for p in sorted(projects):
+                manifest = p / "manifest.json"
+                if manifest.exists():
+                    try:
+                        data = json.loads(manifest.read_text())
+                        files = len(list(p.glob("*.md")))
+                        t.add_row(data.get("name", p.name), data.get("type", "?"), str(files) + " docs")
+                    except Exception:
+                        t.add_row(p.name, "?", "?")
+            _console.print(t)
+        else:
+            for p in sorted(projects):
+                print(f"  {p.name}/")
 
     def _cmd_clear(self, _):
         self._memory.short.clear()

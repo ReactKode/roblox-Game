@@ -25,6 +25,7 @@ Examples:
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--chat", metavar="MSG", help="Single message (non-interactive)")
     parser.add_argument("--learn", metavar="TOPIC", help="Learn a skill and exit")
+    parser.add_argument("--project", metavar="GOAL", help="Run full Hive pipeline for a project goal")
     parser.add_argument("--status", action="store_true", help="Print status JSON and exit")
     parser.add_argument("--skills", action="store_true", help="List learned skills")
     parser.add_argument("--profile", action="store_true", help="Show agent self-model profile")
@@ -67,6 +68,12 @@ Examples:
         elif args.learn:
             result = agent.learn(args.learn)
             print(result)
+        elif args.project:
+            project = agent.run_project(args.project)
+            print(f"\nProject '{project.name}' complete!")
+            for role_id, deliv in project.deliverables.items():
+                if not role_id.startswith("_"):
+                    print(f"  ✓ {deliv.title} ({deliv.word_count} words)")
         elif args.chat:
             agent._verbose = args.verbose
             response = agent.chat(args.chat)

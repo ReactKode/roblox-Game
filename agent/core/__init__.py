@@ -1,5 +1,2 @@
-from .agent import NexusAgent
-from .reflector import Reflector, Reflection
-from .self_model import SelfModel
-
-__all__ = ["NexusAgent", "Reflector", "Reflection", "SelfModel"]
+# core package — import directly from submodules to avoid circular imports
+# e.g. from agent.core.agent import NexusAgent
