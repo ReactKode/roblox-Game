@@ -22,6 +22,7 @@ from .self_model import SelfModel
 from agent.hive.orchestrator import OrchestratorAgent
 from agent.hive.roles import ROLES
 from agent.hive.asset_pipeline import AssetPipelineAgent, ENGINE_SETUP
+from agent.hive.world_builder import WorldBuilderAgent
 
 try:
     from rich.console import Console
@@ -138,6 +139,10 @@ class NexusAgent:
         self._assets = AssetPipelineAgent(self._model, data_dir)
         self._assets.set_print(self._hive_log)
 
+        # ── World builder ─────────────────────────────────────────────────
+        self._world_builder = WorldBuilderAgent(self._model, data_dir)
+        self._world_builder.set_print(self._hive_log)
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def chat(self, message: str) -> str:
@@ -181,6 +186,24 @@ class NexusAgent:
                 metadata={"asset_pipeline": True},
             )
         return pkgs
+
+    def build_world(self, description: str, style: str = "low poly stylized",
+                    size: float = 100.0, engines: list[str] = None):
+        """Build a complete 3D world: plan → create each asset → assemble world scene."""
+        world = self._world_builder.build(
+            description=description,
+            style=style,
+            size=size,
+            engines=engines or ["unreal", "unity", "godot"],
+        )
+        if self._memory:
+            self._memory.store_fact(
+                f"Built 3D world '{world.name}': {len(world.assets)} asset types, "
+                f"{sum(a.count for a in world.assets)} total objects. Description: {description}",
+                importance=0.9,
+                metadata={"world_builder": True, "world_name": world.name},
+            )
+        return world
 
     def _hive_log(self, msg: str):
         if HAS_RICH and _console:
@@ -306,6 +329,8 @@ class NexusAgent:
             "/projects": self._cmd_projects,
             "/asset": self._cmd_asset,
             "/assets": self._cmd_assets,
+            "/world": self._cmd_world,
+            "/worlds": self._cmd_worlds,
             "/skills": self._cmd_skills,
             "/learn": self._cmd_learn,
             "/skill": self._cmd_skill,
@@ -355,6 +380,13 @@ class NexusAgent:
 | `/asset <description>` | Create 3D asset in Blender, export to all 3 engines |
 | `/asset <description> --engines unreal,godot` | Target specific engines |
 | `/assets` | List all created assets |
+
+**🌍 World Builder (Complete Game Worlds)**
+| Command | Description |
+|---|---|
+| `/world <description>` | Plan + build a full 3D world scene (terrain, buildings, trees, props) |
+| `/world <description> --style realistic --size 200` | Custom style and size in metres |
+| `/worlds` | List all built worlds |
 
 **⚙️ System**
 | Command | Description |
@@ -639,6 +671,117 @@ class NexusAgent:
         else:
             for a in sorted(asset_list):
                 print(f"  {a.name}/")
+
+    def _cmd_world(self, arg: str):
+        """Usage: /world <description> [--style <style>] [--size <metres>] [--engines unreal,unity,godot]"""
+        if not arg:
+            _p(
+                "Usage: /world <description> [--style <style>] [--size <metres>] [--engines e1,e2]\n\n"
+                "Examples:\n"
+                "  /world a medieval village with a castle and marketplace\n"
+                "  /world a dark forest with ancient ruins --style dark fantasy\n"
+                "  /world a sci-fi space station interior --size 50\n"
+                "  /world a tropical island with beaches and jungle --engines godot,unity\n\n"
+                "Defaults: style='low poly stylized', size=100m, engines=all three"
+            )
+            return
+
+        # Parse optional flags
+        style = "low poly stylized"
+        size = 100.0
+        engines = ["unreal", "unity", "godot"]
+        description = arg
+
+        if "--style" in arg:
+            parts = arg.split("--style", 1)
+            description = parts[0].strip()
+            remainder = parts[1].strip()
+            if "--size" in remainder:
+                s, remainder = remainder.split("--size", 1)
+                style = s.strip()
+                remainder = remainder.strip()
+            elif "--engines" in remainder:
+                s, remainder = remainder.split("--engines", 1)
+                style = s.strip()
+                remainder = remainder.strip()
+                engines = [e.strip() for e in remainder.split(",")]
+                remainder = ""
+            else:
+                style = remainder.strip()
+                remainder = ""
+
+        if "--size" in description:
+            parts = description.split("--size", 1)
+            description = parts[0].strip()
+            rest = parts[1].strip()
+            try:
+                size = float(rest.split()[0])
+            except (ValueError, IndexError):
+                pass
+
+        if "--engines" in description:
+            parts = description.split("--engines", 1)
+            description = parts[0].strip()
+            engines = [e.strip() for e in parts[1].split(",")]
+
+        if HAS_RICH:
+            _console.rule("[bold cyan]World Builder[/bold cyan]")
+            _console.print(f"[bold]World:[/bold] {description}")
+            _console.print(f"[dim]Style: {style} | Size: {size}m × {size}m | Engines: {', '.join(engines)}[/dim]\n")
+        else:
+            print(f"\n{'='*60}\nWorld Builder — {description}\n{'='*60}")
+
+        try:
+            world = self.build_world(description, style=style, size=size, engines=engines)
+            if HAS_RICH:
+                _console.rule("[bold green]World Complete[/bold green]")
+                t = Table(title=f"🌍 {world.name}", header_style="bold cyan")
+                t.add_column("Asset"); t.add_column("Type"); t.add_column("Count"); t.add_column("Files")
+                for pa in world.assets:
+                    files = len(pa.package.files) if pa.package else 0
+                    t.add_row(pa.name, pa.asset_type, str(pa.count),
+                              f"{files} exported" if files else "script only")
+                _console.print(t)
+                _console.print(f"\n[dim]Saved to: {world.world_dir}[/dim]")
+                if world.assembly_script:
+                    _console.print(
+                        f"[dim]Assembly: blender --background --python {world.assembly_script}[/dim]"
+                    )
+            else:
+                print(f"\nWorld '{world.name}' complete!")
+                for pa in world.assets:
+                    print(f"  • {pa.name} × {pa.count} [{pa.asset_type}]")
+        except Exception as e:
+            _p(f"[red]World builder error: {e}[/red]" if HAS_RICH else f"Error: {e}")
+
+    def _cmd_worlds(self, _):
+        worlds_dir = self._data_dir / "worlds"
+        if not worlds_dir.exists():
+            _p("No worlds built yet. Use /world <description> to build one.")
+            return
+        world_list = [w for w in worlds_dir.iterdir() if w.is_dir()]
+        if not world_list:
+            _p("No worlds found.")
+            return
+        import json as _json
+        if HAS_RICH:
+            t = Table(title=f"Built Worlds ({len(world_list)})", header_style="bold cyan")
+            t.add_column("Name"); t.add_column("Style"); t.add_column("Assets"); t.add_column("Exported")
+            for w in sorted(world_list):
+                manifest = w / "manifest.json"
+                if manifest.exists():
+                    try:
+                        data = _json.loads(manifest.read_text())
+                        n_assets = len(data.get("assets", []))
+                        executed = "✓ FBX+GLB" if data.get("blender_executed") else "scripts only"
+                        t.add_row(data.get("name", w.name), data.get("style", "?"),
+                                  str(n_assets), executed)
+                    except Exception:
+                        t.add_row(w.name, "?", "?", "?")
+            _console.print(t)
+        else:
+            for w in sorted(world_list):
+                print(f"  {w.name}/")
 
     def _cmd_clear(self, _):
         self._memory.short.clear()

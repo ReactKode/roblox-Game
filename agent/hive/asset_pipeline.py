@@ -2,7 +2,7 @@
 
 Flow:
   1. Plan     — LLM decides what assets to create from a description
-  2. Create   — BlenderAssetAgent generates script + runs headlessly
+  2. Create   — BlenderArtistAgent generates script + runs headlessly (with research)
   3. Distribute — Engine importers set up Unreal / Unity / Godot simultaneously
   4. Report   — Summary of what was created and where to find it
 """
@@ -11,7 +11,8 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .blender_asset import BlenderAssetAgent, AssetPackage
+from .blender_asset import AssetPackage
+from .blender_artist import BlenderArtistAgent, AssetBrief
 from .engine_importers import setup_unreal, setup_unity, setup_godot
 
 # Engines we support
@@ -56,7 +57,7 @@ class AssetPipelineAgent:
     def __init__(self, model_client, data_dir: Path):
         self._model = model_client
         self._data_dir = data_dir
-        self._blender = BlenderAssetAgent(model_client, data_dir)
+        self._blender = BlenderArtistAgent(model_client, data_dir / "assets")
         self._print_fn = print
 
     def set_print(self, fn):
@@ -90,11 +91,12 @@ class AssetPipelineAgent:
         packages: list[AssetPackage] = []
         for plan in asset_plans:
             self._log(f"\n🖌️  [Blender Artist] Creating '{plan['name']}' ({plan['type']})...")
-            pkg = self._blender.create(
+            brief = AssetBrief(
+                name=plan["name"],
                 description=plan["description"],
-                asset_name=plan["name"],
                 asset_type=plan["type"],
             )
+            pkg = self._blender.create(brief)
             status = f"✓ executed ({len(pkg.files)} files exported)" if pkg.files else "✓ script generated (no Blender)"
             self._log(f"🖌️  [Blender Artist] {status}")
             packages.append(pkg)
