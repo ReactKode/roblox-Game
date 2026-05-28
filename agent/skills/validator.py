@@ -1,5 +1,10 @@
 """Skill validator — tests learned skills before storing them as trusted knowledge."""
+import json
 import re
+
+from ..core.logger import get_logger
+
+log = get_logger(__name__)
 
 # Patterns that indicate the code template can actually be run safely
 _RUNNABLE_DOMAINS = {"python", "javascript", "web", "research", "machine_learning", "business", "general"}
@@ -10,6 +15,7 @@ _UNSAFE_PATTERNS = [
     r"\brm\s+-rf\b", r"\bos\.remove\b", r"\bshutil\.rmtree\b",
     r"\bsubprocess\b.*shell\s*=\s*True",
     r"\b__import__\b", r"\beval\b\s*\(",
+    r"\bos\.system\b", r"\bpickle\.loads\b",
 ]
 
 REVIEW_PROMPT = """Review this skill procedure for quality and accuracy.
@@ -50,9 +56,9 @@ class SkillValidator:
         code = skill.get("code_template", "")
         procedure = skill.get("procedure", "")
 
-        issues = []
+        issues: list[str] = []
 
-        # Basic quality checks
+        # Basic quality checks (these add to issues but don't block code execution)
         if len(procedure.strip()) < 50:
             issues.append("Procedure is too short — likely incomplete")
         if procedure.count("\n") < 2:
@@ -60,37 +66,49 @@ class SkillValidator:
         if not code or code.strip() == "N/A":
             issues.append("No code template provided")
 
-        # Safety check on code
+        # Safety check on code — unsafe patterns block execution
+        is_unsafe = False
         for pattern in _UNSAFE_PATTERNS:
             if re.search(pattern, code):
-                issues.append(f"Potentially unsafe code pattern: {pattern}")
+                issues.append(f"Potentially unsafe code pattern detected: {pattern}")
+                is_unsafe = True
 
-        # Try running the code if domain allows it
+        # Try running the code if domain allows it (run regardless of quality issues,
+        # just not if code is unsafe or missing)
         run_confidence = None
-        if domain in _RUNNABLE_DOMAINS and code and "N/A" not in code and not issues:
+        if domain in _RUNNABLE_DOMAINS and code and "N/A" not in code and not is_unsafe:
             run_confidence = self._run_code(code, issues)
 
-        # LLM review for non-runnable domains or when no run result
+        # LLM review for non-runnable domains or to supplement run result
         llm_confidence = None
         if self._model and (domain in _REVIEW_ONLY_DOMAINS or run_confidence is None):
             llm_confidence = self._llm_review(skill, issues)
 
-        # Final confidence score
+        # Combine scores
         if run_confidence is not None and llm_confidence is not None:
-            confidence = (run_confidence * 0.6 + llm_confidence * 0.4)
+            confidence = run_confidence * 0.6 + llm_confidence * 0.4
         elif run_confidence is not None:
             confidence = run_confidence
         elif llm_confidence is not None:
             confidence = llm_confidence
         else:
-            # No validation possible — conservative score
+            # No validation path available — conservative score
             confidence = 0.5 if not issues else 0.3
 
+        # Penalise for each confirmed issue
+        confidence = max(0.1, confidence - len(issues) * 0.05)
+
+        log.debug("Validated skill '%s' (domain=%s): confidence=%.2f, issues=%d",
+                  skill.get("name", "?"), domain, confidence, len(issues))
         return round(confidence, 2), issues
 
     def _run_code(self, code: str, issues: list) -> float:
-        from ..tools.code_runner import run_python
-        # Add a safety wrapper — catch imports that don't exist gracefully
+        try:
+            from ..tools.code_runner import run_python
+        except ImportError:
+            log.warning("code_runner not available — skipping execution validation")
+            return None
+
         test_code = f"""
 import sys
 try:
@@ -103,7 +121,12 @@ except SyntaxError as e:
 except Exception as e:
     print(f"RUNTIME_WARNING: {{e}}")
 """
-        result = run_python(test_code, timeout=10)
+        try:
+            result = run_python(test_code, timeout=10)
+        except Exception:
+            log.exception("Code runner raised an exception")
+            return 0.4
+
         stderr = result.get("stderr", "")
         stdout = result.get("stdout", "")
 
@@ -111,10 +134,9 @@ except Exception as e:
             issues.append(f"Code has syntax error: {stderr[:200]}")
             return 0.2
         if "IMPORT_WARNING" in stdout:
-            # Missing library — code structure is valid, just needs dependencies
             issues.append("Code requires additional libraries to run")
             return 0.6
-        if result["success"]:
+        if result.get("success"):
             return 0.9
         issues.append(f"Code execution failed: {stderr[:150]}")
         return 0.35
@@ -133,11 +155,38 @@ except Exception as e:
                 {"role": "system", "content": "You are a technical reviewer. Output only valid JSON."},
                 {"role": "user", "content": prompt},
             ])
-            import json
-            data = json.loads(response.strip())
+            data = _parse_review_json(response)
+            if not data:
+                log.warning("Validator LLM review returned no parseable JSON")
+                return None
             for issue in data.get("issues", []):
                 if issue and issue not in issues:
                     issues.append(issue)
-            return float(data.get("confidence", 0.6))
+            conf = float(data.get("confidence", 0.6))
+            return max(0.0, min(1.0, conf))
         except Exception:
+            log.exception("LLM review failed for skill '%s'", skill.get("name", "?"))
             return None
+
+
+def _parse_review_json(text: str) -> dict | None:
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    for pattern in [r"```json\s*(\{.*?\})\s*```", r"```\s*(\{.*?\})\s*```"]:
+        m = re.search(pattern, text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except json.JSONDecodeError:
+                pass
+    for m in re.finditer(r"\{[^{}]{10,}\}", text, re.DOTALL):
+        try:
+            obj = json.loads(m.group())
+            if any(k in obj for k in ("confidence", "is_valid", "issues")):
+                return obj
+        except json.JSONDecodeError:
+            continue
+    return None

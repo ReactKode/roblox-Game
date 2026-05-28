@@ -1,6 +1,9 @@
 """Autonomous skill learner — multi-pass research, synthesis, and validation."""
 from datetime import datetime
 from ..tools import web_search, web_scrape
+from ..core.logger import get_logger
+
+log = get_logger(__name__)
 
 
 SYNTHESIZE_PROMPT = """You are an expert technical trainer. Analyze this research about "{topic}" and create a high-quality, actionable skill guide.
@@ -100,10 +103,14 @@ class SkillLearner:
         queries.append(f"{topic} best practices tips")
 
         collected = []
-        urls_scraped = set()
+        urls_scraped: set[str] = set()
 
         for query in queries[:3]:
-            results = web_search.search(query, max_results=4)
+            try:
+                results = web_search.search(query, max_results=4)
+            except Exception:
+                log.warning("web_search failed for query: '%s'", query[:80])
+                results = []
             for r in results[:3]:
                 snippet = r.get("snippet", "").strip()
                 url = r.get("url", "")
@@ -113,7 +120,11 @@ class SkillLearner:
                     collected.append(f"[{title}]\n{snippet}")
 
                 if url and url not in urls_scraped and len(collected) < 8:
-                    page = web_scrape.scrape(url, max_chars=2500)
+                    try:
+                        page = web_scrape.scrape(url, max_chars=2500)
+                    except Exception:
+                        log.warning("web_scrape failed for url: %s", url[:100])
+                        page = ""
                     if page and not page.startswith("Error") and len(page) > 100:
                         collected.append(f"[Full page: {title}]\n{page}")
                         urls_scraped.add(url)
@@ -137,24 +148,43 @@ class SkillLearner:
             source_count=max(source_count, 1),
             content=content[:6000],
         )
-        response = self._model.chat([
-            {"role": "system", "content": "You are an expert technical trainer creating skill guides. Output only valid JSON."},
-            {"role": "user", "content": prompt},
-        ])
+        try:
+            response = self._model.chat([
+                {"role": "system",
+                 "content": "You are an expert technical trainer creating skill guides. Output only valid JSON."},
+                {"role": "user", "content": prompt},
+            ])
+        except Exception:
+            log.exception("LLM synthesis failed for topic '%s', using template fallback", topic)
+            return self._template_skill(topic, domain, content)
 
-        # Parse JSON from response
+        # Parse JSON — try direct, then fenced, then bare object extraction
         data = None
         try:
             data = json.loads(response.strip())
         except json.JSONDecodeError:
-            match = re.search(r"\{.*\}", response, re.DOTALL)
-            if match:
+            pass
+        if not data:
+            for pat in [r"```json\s*(\{.*?\})\s*```", r"```\s*(\{.*?\})\s*```"]:
+                m = re.search(pat, response, re.DOTALL)
+                if m:
+                    try:
+                        data = json.loads(m.group(1))
+                        break
+                    except json.JSONDecodeError:
+                        pass
+        if not data:
+            for m in re.finditer(r"\{[^{}]{20,}\}", response, re.DOTALL):
                 try:
-                    data = json.loads(match.group())
+                    obj = json.loads(m.group())
+                    if "description" in obj or "procedure" in obj:
+                        data = obj
+                        break
                 except json.JSONDecodeError:
-                    pass
+                    continue
 
         if not data:
+            log.warning("Could not parse LLM synthesis for '%s', using template fallback", topic)
             return self._template_skill(topic, domain, content)
 
         return {

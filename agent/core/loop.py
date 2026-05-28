@@ -3,6 +3,10 @@ import json
 import re
 from datetime import datetime
 
+from .logger import get_logger
+
+log = get_logger(__name__)
+
 
 # ── System prompt ────────────────────────────────────────────────────────────
 
@@ -90,11 +94,17 @@ class AgentLoop:
 
             if action is None:
                 # Gave up retrying — treat raw text as answer
+                log.warning("All JSON retry attempts exhausted after %d iterations", iterations)
                 final_answer = response
                 break
 
             if "final_answer" in action:
-                final_answer = str(action["final_answer"])
+                answer = str(action["final_answer"]).strip()
+                if answer:
+                    final_answer = answer
+                else:
+                    log.warning("Model returned empty final_answer, continuing loop")
+                    continue
                 break
 
             # Handle both {"tool": ..., "args": ...} and OpenAI tool_calls format
@@ -113,7 +123,12 @@ class AgentLoop:
                                   "content": f"Tool '{tool_name}' returned:\n{observation}"})
 
         if not final_answer:
-            final_answer = f"Reached {self.max_iterations} steps without completing. Last response: {response[:400]}"
+            log.warning("Reached max_iterations=%d without a final answer (task='%s')",
+                        self.max_iterations, task[:80])
+            final_answer = (
+                f"I reached the maximum number of steps ({self.max_iterations}) "
+                f"without completing this task. Last response: {response[:400]}"
+            )
             success = False
 
         # Post-task: reflect and update self-model
@@ -179,13 +194,9 @@ class AgentLoop:
                     reflection.confidence,
                 )
 
-        # Update self-model task stats
+        # Update self-model task stats — infer domain from tools used and task text
         if self._self_model:
-            domain = "general"
-            if tools_used:
-                learn_calls = [t for t in tools_used if t == "learn_skill"]
-                if learn_calls:
-                    domain = "skill_learning"
+            domain = _infer_domain(task, tools_used)
             self._self_model.record_task(success, iterations, domain)
 
     def _build_system_prompt(self, task: str) -> str:
@@ -255,3 +266,37 @@ def _parse_action(text: str) -> dict | None:
             continue
 
     return None
+
+
+# ── Domain inference ─────────────────────────────────────────────────────────
+
+_DOMAIN_KEYWORDS: list[tuple[str, list[str]]] = [
+    ("blender",       ["blender", "bpy", "3d model", "mesh", "rigging", "sculpt"]),
+    ("unity",         ["unity", "c#", "monobehaviour", "prefab", "unityengine"]),
+    ("godot",         ["godot", "gdscript", "node3d", "characterbody"]),
+    ("unreal_engine", ["unreal", "ue5", "blueprint", "nanite", "lumen"]),
+    ("game_dev",      ["game", "level design", "gameplay", "spawn", "hitbox", "physics"]),
+    ("python",        ["python", "flask", "fastapi", "django", "pandas", "numpy", "pytest"]),
+    ("machine_learning", ["ml", "machine learning", "neural network", "pytorch", "tensorflow",
+                          "scikit", "model training", "dataset"]),
+    ("business",      ["business", "startup", "revenue", "marketing", "saas", "monetize"]),
+    ("research",      ["research", "find information", "what is", "how does", "explain"]),
+    ("skill_learning", ["learn", "skill", "tutorial", "how to", "guide"]),
+]
+
+
+def _infer_domain(task: str, tools_used: list[str]) -> str:
+    """Infer the primary skill domain from task text and tools used."""
+    task_lower = task.lower()
+    # Check task text against domain keywords
+    for domain, keywords in _DOMAIN_KEYWORDS:
+        if any(kw in task_lower for kw in keywords):
+            return domain
+    # Fall back to tool-based inference
+    if "learn_skill" in tools_used:
+        return "skill_learning"
+    if "web_search" in tools_used or "web_scrape" in tools_used:
+        return "research"
+    if "run_python" in tools_used:
+        return "python"
+    return "general"

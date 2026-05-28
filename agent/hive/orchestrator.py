@@ -19,6 +19,9 @@ from .project import Project, ProjectTask, Deliverable
 from .roles import ROLES, PROJECT_ROLES, ROLE_TASKS, RoleConfig
 from .specialist import SpecialistAgent
 from ..core.loop import _parse_action
+from ..core.logger import get_logger
+
+log = get_logger(__name__)
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
@@ -113,6 +116,7 @@ class OrchestratorAgent:
         self._memory = memory_manager
         self._data_dir = data_dir
         self._print_fn = print  # overridable for rich output
+        self._deliverable_lock = threading.Lock()  # guards project.deliverables concurrent writes
 
     def set_print(self, fn):
         self._print_fn = fn
@@ -177,11 +181,17 @@ class OrchestratorAgent:
 
     def _brainstorm(self, goal: str) -> "ProjectWithEmoji":
         prompt = BRAINSTORM_PROMPT.format(goal=goal)
-        response = self._model.chat([
-            {"role": "system", "content": "You are a creative director. Output only valid JSON."},
-            {"role": "user", "content": prompt},
-        ])
+        try:
+            response = self._model.chat([
+                {"role": "system", "content": "You are a creative director. Output only valid JSON."},
+                {"role": "user", "content": prompt},
+            ])
+        except Exception:
+            log.exception("Brainstorm model call failed, using defaults")
+            response = "{}"
         data = _parse_json(response) or {}
+        if not data:
+            log.warning("Brainstorm returned no parseable JSON — using goal as project name")
 
         # Validate roles exist
         raw_roles = data.get("roles_needed", [])
@@ -274,12 +284,14 @@ class OrchestratorAgent:
             task.status = "complete"
             task.completed_at = datetime.utcnow().isoformat()
 
-            # Store in project (thread-safe dict update)
-            project.deliverables[task.role] = deliverable
+            # Thread-safe dict write — multiple specialists may finish simultaneously
+            with self._deliverable_lock:
+                project.deliverables[task.role] = deliverable
             self._log(f"  {emoji} [{title}] ✓ Done ({deliverable.word_count} words)")
-        except Exception as e:
+        except Exception:
             task.status = "failed"
-            self._log(f"  {emoji} [{title}] ✗ Failed: {e}")
+            log.exception("[%s] specialist task failed", task.role)
+            self._log(f"  {emoji} [{title}] ✗ Failed — see nexus.log for details")
 
     # ── Stage 4: Review ───────────────────────────────────────────────────
 
@@ -320,13 +332,11 @@ class OrchestratorAgent:
             {"role": "user", "content": prompt},
         ])
         data = _parse_json(response) or {}
-        approved = data.get("approved", True)
         score = float(data.get("score", 7.0))
         feedback = data.get("feedback", "")
         revision = data.get("revision_request", "")
-        # Auto-approve if score is acceptable even if "approved" is false
-        if score >= 6.5:
-            approved = True
+        # Approve when score meets threshold — model's boolean can be overly strict
+        approved = score >= 6.5
         return approved, score, feedback, revision
 
     def _revise(self, project: Project, role: RoleConfig,

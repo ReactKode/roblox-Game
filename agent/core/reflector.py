@@ -4,6 +4,9 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from .logger import get_logger
+
+log = get_logger(__name__)
 
 REFLECT_PROMPT = """You just completed a task. Critically analyze your own performance.
 
@@ -62,45 +65,71 @@ class Reflector:
         )
         try:
             response = self._model.chat([
-                {"role": "system", "content": "You are critically analyzing AI agent performance. Output only valid JSON."},
+                {"role": "system",
+                 "content": "You are critically analyzing AI agent performance. Output only valid JSON."},
                 {"role": "user", "content": prompt},
             ])
-            data = _parse_json(response)
-            if not data:
-                return None
-            r = Reflection(
-                task=task,
-                what_worked=data.get("what_worked", ""),
-                what_failed=data.get("what_failed", "nothing"),
-                lesson=data.get("lesson", ""),
-                next_time=data.get("next_time", ""),
-                confidence=float(data.get("confidence", 0.7)),
-                tags=data.get("tags", []),
-                skill_domain=data.get("skill_domain", "general"),
-                tools_used=tools_used,
-                success=success,
-                iterations=iterations,
-            )
-            if self._episodic:
+        except Exception:
+            log.exception("Reflector: model call failed for task '%s'", task[:60])
+            return None
+
+        data = _parse_json(response)
+        if not data:
+            log.warning("Reflector: could not parse JSON from model response for task '%s'", task[:60])
+            return None
+
+        confidence = float(data.get("confidence", 0.7))
+        # Clamp to valid range
+        confidence = max(0.0, min(1.0, confidence))
+
+        r = Reflection(
+            task=task,
+            what_worked=data.get("what_worked", ""),
+            what_failed=data.get("what_failed", "nothing"),
+            lesson=data.get("lesson", ""),
+            next_time=data.get("next_time", ""),
+            confidence=confidence,
+            tags=data.get("tags", []),
+            skill_domain=data.get("skill_domain", "general"),
+            tools_used=tools_used,
+            success=success,
+            iterations=iterations,
+        )
+
+        if self._episodic:
+            try:
                 self._episodic.log(
                     task=task,
                     action="reflection",
-                    observation=f"lesson={r.lesson} | next_time={r.next_time}",
-                    outcome=f"confidence={r.confidence:.2f} | domain={r.skill_domain}",
+                    # Store full lesson + next_time so get_relevant_reflections can return them
+                    observation=f"lesson={r.lesson} | next_time={r.next_time} | worked={r.what_worked}",
+                    outcome=f"confidence={r.confidence:.2f} | domain={r.skill_domain} | failed={r.what_failed}",
                     skill_used=r.skill_domain,
                     success=success,
                     is_reflection=True,
                     tags=r.tags,
                 )
-            return r
-        except Exception:
-            return None
+            except Exception:
+                log.exception("Reflector: failed to log reflection to episodic memory")
+
+        log.debug("Reflection stored (domain=%s, confidence=%.2f)", r.skill_domain, r.confidence)
+        return r
 
     def get_relevant_reflections(self, task: str, limit: int = 3) -> list[str]:
         if not self._episodic:
             return []
-        episodes = self._episodic.recall_reflections(task, limit)
-        return [e["observation"] for e in episodes if e.get("observation")]
+        try:
+            episodes = self._episodic.recall_reflections(task, limit)
+        except Exception:
+            log.exception("Reflector: failed to recall reflections for task '%s'", task[:60])
+            return []
+        summaries = []
+        for e in episodes:
+            obs = e.get("observation", "")
+            outcome = e.get("outcome", "")
+            if obs:
+                summaries.append(f"{obs} | {outcome}".strip(" |"))
+        return summaries
 
 
 def _parse_json(text: str) -> dict | None:
@@ -109,10 +138,20 @@ def _parse_json(text: str) -> dict | None:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
+    # Try markdown code fences first (more specific than bare regex)
+    for pattern in [r"```json\s*(\{.*?\})\s*```", r"```\s*(\{.*?\})\s*```"]:
+        m = re.search(pattern, text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except json.JSONDecodeError:
+                pass
+    # Last resort: find first {...} containing known keys
+    for m in re.finditer(r"\{[^{}]{10,}\}", text, re.DOTALL):
         try:
-            return json.loads(match.group())
+            obj = json.loads(m.group())
+            if any(k in obj for k in ("confidence", "lesson", "what_worked")):
+                return obj
         except json.JSONDecodeError:
-            pass
+            continue
     return None

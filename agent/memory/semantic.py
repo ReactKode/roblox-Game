@@ -11,6 +11,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from ..core.logger import get_logger
+
+log = get_logger(__name__)
+
 
 MemoryType = Literal["fact", "skill", "lesson", "reflection", "conversation", "research"]
 
@@ -66,11 +70,17 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 def _is_duplicate(new_text: str, existing_texts: list[str], threshold: float = 0.85) -> bool:
     new_tokens = set(_tokenize(new_text))
-    for existing in existing_texts[-50:]:  # Only check recent 50
+    if not new_tokens:
+        return False
+    # Check all records up to 500 (was 50 — avoids missing old duplicates in large stores)
+    for existing in existing_texts[-500:]:
         ex_tokens = set(_tokenize(existing))
-        if not new_tokens or not ex_tokens:
+        if not ex_tokens:
             continue
-        overlap = len(new_tokens & ex_tokens) / len(new_tokens | ex_tokens)
+        union = new_tokens | ex_tokens
+        if not union:
+            continue
+        overlap = len(new_tokens & ex_tokens) / len(union)
         if overlap >= threshold:
             return True
     return False
@@ -93,7 +103,10 @@ class _JSONStore:
                 self._records = []
 
     def _save(self):
-        self._path.write_text(json.dumps(self._records, indent=2))
+        try:
+            self._path.write_text(json.dumps(self._records, indent=2), encoding="utf-8")
+        except Exception:
+            log.exception("SemanticMemory._JSONStore: failed to save %s", self._path)
 
     def add(self, text: str, embedding: list[float], metadata: dict) -> str:
         existing_texts = [r["text"] for r in self._records]
@@ -176,6 +189,7 @@ class _ChromaStore:
             return [{"text": d, "metadata": m, "score": round(1 - dist, 4)}
                     for d, m, dist in zip(docs, metas, dists)]
         except Exception:
+            log.exception("ChromaDB query failed for query '%s'", query[:60])
             return []
 
     def count(self) -> int:
@@ -194,9 +208,15 @@ class SemanticMemory:
     def _init(self, backend: str):
         if backend in ("chromadb", "auto"):
             try:
-                return _ChromaStore(self._data_dir / "chroma")
-            except (ImportError, Exception):
-                pass
+                store = _ChromaStore(self._data_dir / "chroma")
+                log.info("SemanticMemory: using ChromaDB backend")
+                return store
+            except ImportError:
+                log.info("SemanticMemory: chromadb not installed, using JSON+TF-IDF fallback")
+            except Exception:
+                log.warning("SemanticMemory: ChromaDB init failed, falling back to JSON+TF-IDF",
+                            exc_info=True)
+        log.info("SemanticMemory: using JSON+TF-IDF backend")
         return _JSONStore(self._data_dir / "vectors.json")
 
     @property

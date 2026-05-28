@@ -3,6 +3,10 @@ import json
 import re
 from dataclasses import dataclass, field
 
+from .logger import get_logger
+
+log = get_logger(__name__)
+
 COMPLEXITY_SIGNALS = [
     "build", "create a full", "develop", "start a", "make a complete",
     "and then", "after that", "step by step", "from scratch", "entire",
@@ -63,20 +67,31 @@ class TaskPlanner:
                 {"role": "system", "content": "You are a precise task planner. Output only valid JSON array."},
                 {"role": "user", "content": prompt},
             ])
-            # Extract JSON array
-            m = re.search(r"\[.*\]", response, re.DOTALL)
-            if m:
-                items = json.loads(m.group())
-                return [
-                    SubTask(
-                        id=item["id"],
-                        description=item["description"],
-                        depends_on=item.get("depends_on", []),
-                    )
-                    for item in items
-                ]
         except Exception:
-            pass
+            log.exception("TaskPlanner: model call failed for task '%s'", task[:60])
+            return [SubTask(id=1, description=task)]
+
+        try:
+            # Extract JSON array — try direct parse first, then extract from text
+            raw = response.strip()
+            if not raw.startswith("["):
+                m = re.search(r"\[.*\]", raw, re.DOTALL)
+                raw = m.group() if m else "[]"
+            items = json.loads(raw)
+            subtasks = []
+            known_ids: set[int] = set()
+            for item in items:
+                if "id" not in item or "description" not in item:
+                    continue
+                tid = int(item["id"])
+                deps = [d for d in item.get("depends_on", []) if d in known_ids]
+                subtasks.append(SubTask(id=tid, description=item["description"], depends_on=deps))
+                known_ids.add(tid)
+            if subtasks:
+                return subtasks
+        except Exception:
+            log.warning("TaskPlanner: could not parse subtask JSON for task '%s'", task[:60])
+
         return [SubTask(id=1, description=task)]
 
     def ready_tasks(self, tasks: list[SubTask]) -> list[SubTask]:

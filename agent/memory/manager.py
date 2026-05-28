@@ -87,7 +87,7 @@ class MemoryManager:
     def get_relevant_context(self, query: str, k: int = 4) -> str:
         entries = self.recall(query, k)
         if not entries:
-            return "None"
+            return "No relevant memories yet."
         lines = []
         for e in entries:
             tag = f"[{e.memory_type}|importance={e.importance:.1f}]"
