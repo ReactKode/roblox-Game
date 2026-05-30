@@ -138,6 +138,10 @@ class ToolRegistry:
 
     # ── execution ─────────────────────────────────────────────────────────
 
+    def add_tool(self, name: str, func, description: str, parameters: dict) -> None:
+        """Register an additional tool after construction."""
+        self._tools[name] = {"func": func, "description": description, "parameters": parameters}
+
     def execute(self, name: str, args: dict) -> str:
         tool = self._tools.get(name)
         if not tool:

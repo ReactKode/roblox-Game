@@ -19,10 +19,14 @@ from .loop import AgentLoop
 from .planner import TaskPlanner
 from .reflector import Reflector
 from .self_model import SelfModel
+from .subagent import SubAgent
 from agent.hive.orchestrator import OrchestratorAgent
 from agent.hive.roles import ROLES
 from agent.hive.asset_pipeline import AssetPipelineAgent, ENGINE_SETUP
 from agent.hive.world_builder import WorldBuilderAgent
+from agent.scheduler import TaskScheduler
+from agent.sandbox.backends import SandboxManager
+from agent.gateway.manager import GatewayManager
 
 try:
     from rich.console import Console
@@ -143,6 +147,34 @@ class NexusAgent:
         self._world_builder = WorldBuilderAgent(self._model, data_dir)
         self._world_builder.set_print(self._hive_log)
 
+        # ── Subagent delegation ───────────────────────────────────────────
+        self._subagent = SubAgent(
+            model_client=self._model,
+            tool_registry=self._tools,
+            memory_manager=self._memory,
+            skill_registry=self._skills,
+            reflector=self._reflector,
+            self_model=self._self_model,
+            max_iterations=cfg.get("agent", {}).get("max_iterations", 12),
+        )
+
+        # ── Sandbox ───────────────────────────────────────────────────────
+        self._sandbox = SandboxManager(cfg.get("sandbox", {}))
+
+        # ── Scheduler ────────────────────────────────────────────────────
+        sched_cfg = cfg.get("scheduler", {})
+        self._scheduler = TaskScheduler(agent_fn=self.chat)
+        if not sched_cfg.get("enabled", True) and self._scheduler.available:
+            self._scheduler.shutdown()
+
+        # ── Gateways ─────────────────────────────────────────────────────
+        self._gateway_manager = GatewayManager(agent_fn=self.chat)
+        if cfg.get("gateway"):
+            self._register_gateways(cfg["gateway"])
+
+        # ── Extra tools (scheduler / subagent / sandbox) ──────────────────
+        self._register_extra_tools()
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def chat(self, message: str) -> str:
@@ -249,6 +281,16 @@ class NexusAgent:
                 "weaknesses": profile["weaknesses"],
             },
             "tools": self._tools.names(),
+            "scheduler": {
+                "available": self._scheduler.available,
+                "tasks": len(self._scheduler.list_tasks()),
+            },
+            "sandbox": {
+                "backend": self._sandbox.backend_name,
+            },
+            "gateways": {
+                "active": self._gateway_manager.active_gateways(),
+            },
         }
 
     def run_cli(self):
@@ -340,6 +382,11 @@ class NexusAgent:
             "/clear": self._cmd_clear,
             "/verbose": self._cmd_verbose,
             "/model": self._cmd_model,
+            "/schedule": self._cmd_schedule,
+            "/schedules": self._cmd_schedules,
+            "/gateway": self._cmd_gateway,
+            "/gateways": self._cmd_gateways,
+            "/sandbox": self._cmd_sandbox,
         }
         fn = commands.get(cmd)
         if fn:
@@ -388,6 +435,23 @@ class NexusAgent:
 | `/world <description> --style realistic --size 200` | Custom style and size in metres |
 | `/worlds` | List all built worlds |
 
+**⏰ Scheduler (Automated Recurring Tasks)**
+| Command | Description |
+|---|---|
+| `/schedule <when> -- <task>` | Schedule a recurring task in natural language |
+| `/schedules` | List all active scheduled tasks |
+
+**🔌 Gateways (Multi-Platform Messaging)**
+| Command | Description |
+|---|---|
+| `/gateway <platform>` | Start a gateway: telegram, discord, slack, email, cli |
+| `/gateways` | List active gateways |
+
+**📦 Sandbox (Isolated Code Execution)**
+| Command | Description |
+|---|---|
+| `/sandbox <code>` | Run Python code in the sandbox |
+
 **⚙️ System**
 | Command | Description |
 |---|---|
@@ -400,13 +464,15 @@ class NexusAgent:
 **Solo examples:**
 - `How do I rig a character in Blender with Python?`
 - `/learn Godot 4 GDScript game mechanics`
-- `Write a FastAPI server with JWT authentication`
+- `/schedule every 30 minutes -- search for new Godot 4 tutorials`
 
 **Hive examples:**
 - `/project build an AAA souls-like action RPG`
 - `/project build a mobile fitness tracking app`
-- `/project create a SaaS project management tool`
-- `/project build a developer CLI for database migrations`
+
+**Gateway examples:**
+- `/gateway telegram`   (requires token in config.yaml)
+- `/gateway cli`        (launches a gateway-mode terminal session)
 """
         if HAS_RICH:
             _console.print(Markdown(text))
@@ -795,6 +861,77 @@ class NexusAgent:
         _p(f"Active model backend: [bold]{self._model.active_backend}[/bold]" if HAS_RICH
            else f"Active model: {self._model.active_backend}")
 
+    def _cmd_schedule(self, arg: str):
+        """Usage: /schedule <when> -- <task>"""
+        if not arg or "--" not in arg:
+            _p(
+                "Usage: /schedule <when> -- <task>\n\n"
+                "Examples:\n"
+                "  /schedule every 30 minutes -- check the latest Blender news and summarize\n"
+                "  /schedule daily at 09:00 -- send me a morning briefing\n"
+                "  /schedule every Monday at 08:00 -- list this week's dev priorities\n\n"
+                "Schedule expressions:\n"
+                "  'every N minutes/hours/days', 'daily at HH:MM', 'every Monday at HH:MM'\n"
+                "  'hourly', 'daily', 'weekly'"
+            )
+            return
+        parts = arg.split("--", 1)
+        schedule = parts[0].strip()
+        task = parts[1].strip()
+        if not schedule or not task:
+            _p("Usage: /schedule <when> -- <task>")
+            return
+        result = self._do_schedule(schedule, task)
+        _p(f"[green]{result}[/green]" if HAS_RICH else result)
+
+    def _cmd_schedules(self, _):
+        tasks = self._scheduler.list_tasks()
+        if not tasks:
+            _p("No scheduled tasks. Use /schedule <when> -- <task> to add one.")
+            return
+        if HAS_RICH:
+            from rich.table import Table
+            t = Table(title=f"Scheduled Tasks ({len(tasks)})", header_style="bold cyan")
+            t.add_column("ID"); t.add_column("Schedule"); t.add_column("Runs"); t.add_column("Task")
+            for task in tasks:
+                t.add_row(task["id"], task["schedule"], str(task["run_count"]), task["task"][:55])
+            _console.print(t)
+        else:
+            for task in tasks:
+                print(f"  [{task['id']}] {task['schedule']} (×{task['run_count']}) — {task['task'][:60]}")
+
+    def _cmd_gateway(self, platform: str):
+        """Usage: /gateway <platform>  — start a gateway (telegram/discord/slack/email/cli)"""
+        if not platform:
+            _p(
+                "Usage: /gateway <platform>\n\n"
+                "Platforms: telegram | discord | slack | email | cli\n\n"
+                "Configure tokens in config.yaml under 'gateway:' then run /gateway <name>.\n"
+                "Active gateways: " + (", ".join(self._gateway_manager.active_gateways()) or "none")
+            )
+            return
+        result = self.start_gateway(platform)
+        _p(f"[cyan]{result}[/cyan]" if HAS_RICH else result)
+
+    def _cmd_gateways(self, _):
+        active = self._gateway_manager.active_gateways()
+        if not active:
+            _p("No active gateways. Use /gateway <platform> to start one.")
+        else:
+            _p(f"Active gateways: {', '.join(active)}")
+
+    def _cmd_sandbox(self, arg: str):
+        """Usage: /sandbox <python code>"""
+        if not arg:
+            _p(
+                f"Usage: /sandbox <code>\n\n"
+                f"Executes Python code in the sandbox (backend: {self._sandbox.backend_name}).\n\n"
+                "Example: /sandbox print('hello from sandbox')"
+            )
+            return
+        result = self._do_run_sandbox(arg, "python")
+        _p(result)
+
     def _print_banner(self):
         skill_count = len(self._skills.list_all())
         mem_count = self._memory.semantic.count()
@@ -814,6 +951,174 @@ class NexusAgent:
             print(f"  Model: {self._model.active_backend} | Skills: {skill_count} | Memories: {mem_count}")
             print("=" * 52)
 
+    def start_gateway(self, platform: str) -> str:
+        """Start a named gateway (e.g. 'telegram', 'discord', 'slack', 'email', 'cli')."""
+        from agent.gateway.cli_gateway import CLIGateway
+        from agent.gateway.telegram import TelegramGateway
+        from agent.gateway.discord_gw import DiscordGateway
+        from agent.gateway.slack_gw import SlackGateway
+        from agent.gateway.email_gw import EmailGateway
+
+        gw_map = {
+            "cli": lambda cfg: CLIGateway(),
+            "telegram": lambda cfg: TelegramGateway(
+                token=cfg.get("token", ""),
+                allowed_users=cfg.get("allowed_users", []),
+            ),
+            "discord": lambda cfg: DiscordGateway(
+                token=cfg.get("token", ""),
+                allowed_guilds=cfg.get("allowed_guilds", []),
+            ),
+            "slack": lambda cfg: SlackGateway(
+                bot_token=cfg.get("bot_token", ""),
+                app_token=cfg.get("app_token", ""),
+            ),
+            "email": lambda cfg: EmailGateway(
+                imap_host=cfg.get("imap_host", ""),
+                imap_port=int(cfg.get("imap_port", 993)),
+                smtp_host=cfg.get("smtp_host", ""),
+                smtp_port=int(cfg.get("smtp_port", 465)),
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                poll_interval=int(cfg.get("poll_interval", 60)),
+                allowed_senders=cfg.get("allowed_senders"),
+            ),
+        }
+        factory = gw_map.get(platform.lower())
+        if not factory:
+            return f"Unknown gateway '{platform}'. Choose: {', '.join(gw_map)}"
+        gw = factory({})
+        self._gateway_manager.register(gw)
+        self._gateway_manager.start_all()
+        return f"Gateway '{platform}' started."
+
     def shutdown(self):
         self._heartbeat.stop()
+        self._scheduler.shutdown()
+        self._subagent.shutdown()
+        self._gateway_manager.stop_all()
         self._memory.episodic.close()
+
+    # ── Gateway wiring ────────────────────────────────────────────────────
+
+    def _register_gateways(self, gateway_cfg: dict):
+        """Read config and start any enabled gateways as daemon threads."""
+        from agent.gateway.telegram import TelegramGateway
+        from agent.gateway.discord_gw import DiscordGateway
+        from agent.gateway.slack_gw import SlackGateway
+        from agent.gateway.email_gw import EmailGateway
+
+        enabled = []
+
+        tg = gateway_cfg.get("telegram", {})
+        if tg.get("enabled") and tg.get("token"):
+            from agent.gateway.telegram import TelegramGateway
+            gw = TelegramGateway(token=tg["token"], allowed_users=tg.get("allowed_users", []))
+            self._gateway_manager.register(gw)
+            enabled.append("telegram")
+
+        dc = gateway_cfg.get("discord", {})
+        if dc.get("enabled") and dc.get("token"):
+            gw = DiscordGateway(token=dc["token"], allowed_guilds=dc.get("allowed_guilds", []))
+            self._gateway_manager.register(gw)
+            enabled.append("discord")
+
+        sl = gateway_cfg.get("slack", {})
+        if sl.get("enabled") and sl.get("bot_token"):
+            gw = SlackGateway(bot_token=sl["bot_token"], app_token=sl.get("app_token", ""))
+            self._gateway_manager.register(gw)
+            enabled.append("slack")
+
+        em = gateway_cfg.get("email", {})
+        if em.get("enabled") and em.get("imap_host"):
+            gw = EmailGateway(
+                imap_host=em["imap_host"],
+                imap_port=int(em.get("imap_port", 993)),
+                smtp_host=em.get("smtp_host", ""),
+                smtp_port=int(em.get("smtp_port", 465)),
+                username=em.get("username", ""),
+                password=em.get("password", ""),
+                poll_interval=int(em.get("poll_interval", 60)),
+                allowed_senders=em.get("allowed_senders"),
+            )
+            self._gateway_manager.register(gw)
+            enabled.append("email")
+
+        if enabled:
+            self._gateway_manager.start_all()
+            _p(f"Gateways started: {', '.join(enabled)}")
+
+    # ── Extra tools ───────────────────────────────────────────────────────
+
+    def _register_extra_tools(self):
+        """Register scheduler, subagent, and sandbox tools into the tool registry."""
+        self._tools.add_tool(
+            "schedule_task",
+            lambda schedule, task: self._do_schedule(schedule, task),
+            "Schedule a recurring task using natural language (e.g. 'every 5 minutes', 'daily at 09:00', 'every Monday at 08:00').",
+            {"type": "object", "properties": {
+                "schedule": {"type": "string", "description": "Natural language schedule expression"},
+                "task": {"type": "string", "description": "Task or question to run on that schedule"},
+            }, "required": ["schedule", "task"]},
+        )
+        self._tools.add_tool(
+            "cancel_schedule",
+            lambda task_id: self._do_cancel_schedule(task_id),
+            "Cancel a previously scheduled task by its ID.",
+            {"type": "object", "properties": {
+                "task_id": {"type": "string", "description": "ID returned when the task was scheduled"},
+            }, "required": ["task_id"]},
+        )
+        self._tools.add_tool(
+            "list_schedules",
+            lambda: self._do_list_schedules(),
+            "List all currently scheduled tasks with their IDs and run counts.",
+            {"type": "object", "properties": {}, "required": []},
+        )
+        self._tools.add_tool(
+            "run_subagent",
+            lambda task: self._subagent.run(task),
+            "Delegate a complex task to an isolated subagent with its own conversation context.",
+            {"type": "object", "properties": {
+                "task": {"type": "string", "description": "Full description of the task for the subagent"},
+            }, "required": ["task"]},
+        )
+        self._tools.add_tool(
+            "run_in_sandbox",
+            lambda code, language="python": self._do_run_sandbox(code, language),
+            "Execute code in an isolated sandbox. Returns stdout/stderr.",
+            {"type": "object", "properties": {
+                "code": {"type": "string", "description": "Source code to execute"},
+                "language": {"type": "string", "description": "Language: python/javascript/bash (default: python)"},
+            }, "required": ["code"]},
+        )
+
+    def _do_schedule(self, schedule: str, task: str) -> str:
+        task_id = self._scheduler.schedule(schedule, task)
+        if len(task_id) == 8:
+            return f"Scheduled (ID: {task_id}): '{task[:60]}' — {schedule}"
+        return task_id
+
+    def _do_cancel_schedule(self, task_id: str) -> str:
+        return f"Cancelled schedule {task_id}." if self._scheduler.cancel(task_id) \
+            else f"No schedule found with ID '{task_id}'."
+
+    def _do_list_schedules(self) -> str:
+        tasks = self._scheduler.list_tasks()
+        if not tasks:
+            return "No scheduled tasks."
+        lines = [
+            f"[{t['id']}] {t['schedule']} | runs={t['run_count']} | {t['task'][:60]}"
+            for t in tasks
+        ]
+        return f"Scheduled tasks ({len(tasks)}):\n" + "\n".join(lines)
+
+    def _do_run_sandbox(self, code: str, language: str = "python") -> str:
+        result = self._sandbox.execute(code, language)
+        status = "SUCCESS" if result["success"] else "FAILED"
+        parts = [f"[{status}] (backend: {result['backend']})"]
+        if result.get("stdout"):
+            parts.append(f"stdout:\n{result['stdout']}")
+        if result.get("stderr"):
+            parts.append(f"stderr:\n{result['stderr']}")
+        return "\n".join(parts)

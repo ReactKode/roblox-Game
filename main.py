@@ -38,6 +38,8 @@ Examples:
     parser.add_argument("--profile", action="store_true", help="Show agent self-model profile")
     parser.add_argument("--model", help="Force model backend: ollama/lmstudio/openai/anthropic")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show tool calls")
+    parser.add_argument("--gateway", metavar="PLATFORM",
+                        help="Start a gateway then enter CLI: telegram/discord/slack/email/cli")
     args = parser.parse_args()
 
     if args.model:
@@ -103,6 +105,11 @@ Examples:
             if world.assembly_script:
                 print(f"\nTo assemble in Blender:")
                 print(f"  blender --background --python {world.assembly_script}")
+        elif args.gateway:
+            agent._verbose = args.verbose
+            result = agent.start_gateway(args.gateway)
+            print(result)
+            agent.run_cli()
         elif args.chat:
             agent._verbose = args.verbose
             response = agent.chat(args.chat)

@@ -35,3 +35,56 @@ tools:
 
 skills:
   skill_dir: "./data/skills"
+
+# ── Scheduler ──────────────────────────────────────────────────────────────
+# Requires: pip install apscheduler
+scheduler:
+  enabled: true
+
+# ── Sandbox ────────────────────────────────────────────────────────────────
+# backend: local | docker | ssh
+# docker requires: pip install docker
+# ssh requires: pip install paramiko
+sandbox:
+  backend: "local"
+  docker_image: "python:3.11-slim"
+  memory_limit: "256m"
+  network_disabled: true
+  # ssh backend settings (ignored when backend != 'ssh'):
+  # host: "remote.example.com"
+  # port: 22
+  # username: "user"
+  # key_path: "~/.ssh/id_rsa"
+
+# ── Gateways ───────────────────────────────────────────────────────────────
+# Set enabled: true and fill in credentials to activate each gateway.
+# Requires pip packages per platform.
+gateway:
+  telegram:
+    enabled: false
+    token: ""                   # from @BotFather
+    allowed_users: []           # list of Telegram user IDs (strings); empty = allow all
+    # pip install python-telegram-bot
+
+  discord:
+    enabled: false
+    token: ""                   # Discord bot token
+    allowed_guilds: []          # list of guild IDs (integers); empty = allow all
+    # pip install discord.py
+
+  slack:
+    enabled: false
+    bot_token: ""               # xoxb-... Bot User OAuth Token
+    app_token: ""               # xapp-... App-Level Token (Socket Mode)
+    # pip install slack-bolt
+
+  email:
+    enabled: false
+    imap_host: ""               # e.g. imap.gmail.com
+    imap_port: 993
+    smtp_host: ""               # e.g. smtp.gmail.com
+    smtp_port: 465
+    username: ""
+    password: ""                # use App Password for Gmail
+    poll_interval: 60           # seconds between inbox checks
+    allowed_senders: []         # list of email addresses; empty = allow all

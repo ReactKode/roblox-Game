@@ -19,3 +19,15 @@ lxml>=5.0.0
 rich>=13.0.0
 numpy>=1.24.0
 schedule>=1.2.0
+
+# Scheduler (natural language cron)
+apscheduler>=3.10.0
+
+# Gateways — install only what you need:
+# pip install python-telegram-bot>=20.0   # Telegram
+# pip install discord.py>=2.0.0           # Discord
+# pip install slack-bolt>=1.18.0          # Slack
+
+# Sandbox backends — install only what you need:
+# pip install docker>=7.0.0               # Docker sandbox
+# pip install paramiko>=3.0.0             # SSH sandbox
