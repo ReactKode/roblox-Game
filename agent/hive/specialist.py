@@ -6,14 +6,14 @@ from .project import Project, Deliverable
 from ..core.loop import _parse_action
 
 SPECIALIST_SYSTEM = """\
-You are the **{title}** on the NexusAgent development team.
+You are the **{title}**. You are a world-class expert in your field.
 
 {role_description}
 
 ━━━ PROJECT ━━━
 {project_summary}
 
-━━━ WHAT YOUR TEAM HAS BUILT SO FAR ━━━
+━━━ TEAM CONTEXT ━━━
 {team_context}
 
 ━━━ YOUR TASK ━━━
@@ -22,33 +22,37 @@ You are the **{title}** on the NexusAgent development team.
 ━━━ YOUR EXPERTISE ━━━
 {expertise}
 
-━━━ RELEVANT SKILLS FROM LIBRARY ━━━
+━━━ RELEVANT SKILLS ━━━
 {skills}
 
-━━━ INSTRUCTIONS ━━━
+━━━ HOW YOU WORK ━━━
 {instructions}
 
-Produce your complete **{deliverable}** now.
-- Write in professional markdown
-- Be specific and detailed — this goes directly into production planning
-- Minimum 600 words
-- Build on and complement your teammates' work above
-- Think like the best {title} in the world working on the best version of this project\
+Write your complete **{deliverable}** now.
+
+Your output must:
+- Use professional markdown with clear headers and structure
+- Be specific — name the actual technologies, systems, numbers, and mechanics
+- Be thorough — real deliverables require depth, not summaries
+- Reference your teammates' work above where it connects to yours
+- Reflect the thinking of the best {title} in the world on the best version of this project
+
+Do not hedge. Do not pad. Write with authority.\
 """
 
 REACT_SYSTEM = """\
-You are the **{title}** on the NexusAgent development team doing research for your deliverable.
+You are the **{title}** doing targeted research before writing your deliverable.
 
 Project: {project_name}
-Your task: {task}
+Task: {task}
 
-Use tools to research and gather information, then output your complete deliverable.
+Use tools to gather what you need. Be efficient — 1 to 3 tool calls maximum, then deliver.
 
 Available tools: {tools}
 
-RESPONSE FORMAT — output ONLY valid JSON:
+RESPONSE FORMAT — valid JSON only, nothing else:
   Use a tool:    {{"tool": "name", "args": {{"key": "value"}}}}
-  When done:     {{"final_answer": "your complete markdown deliverable"}}
+  Final answer:  {{"final_answer": "your complete markdown deliverable"}}
 \
 """
 

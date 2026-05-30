@@ -26,82 +26,76 @@ log = get_logger(__name__)
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 BRAINSTORM_PROMPT = """\
-You are the Lead Developer and Creative Director at NexusAgent Studios.
-Your job: receive a high-level goal, brainstorm the most compelling version of it, and plan its development.
+You are the Lead Developer and Creative Director. You've shipped products people actually use.
 
 Goal: "{goal}"
 
-Think about:
-- What type of project is this? (game/app/saas/website/tool)
-- What would make this commercially successful and creatively outstanding?
-- What's the killer feature that differentiates it?
-- What's a great name and tagline?
+Think hard about this. What's the most compelling, commercially viable version of this project? What makes it different from what already exists? What would make someone choose this over the competition?
 
-Output ONLY this JSON (no other text):
+Output ONLY this JSON — no preamble, no explanation:
 {{
   "name": "ProjectName",
   "tagline": "One punchy sentence under 15 words",
   "type": "game|app|saas|website|tool",
   "genre": "specific genre (e.g. action_rpg, fitness_app, dev_tool)",
-  "vision": "2-3 sentence compelling vision for what this becomes",
-  "target_audience": "specific description of who this is for",
+  "vision": "2-3 sentence vision — specific, not generic",
+  "target_audience": "exactly who this is for and why they need it",
   "tech_stack": ["technology1", "technology2", "technology3"],
   "unique_selling_points": [
-    "Key differentiator from competitors",
-    "Killer feature that users will love",
-    "Why this will succeed commercially"
+    "The one thing competitors don't have",
+    "The feature users will tell their friends about",
+    "The commercial angle that makes this sustainable"
   ],
   "core_features": ["feature1", "feature2", "feature3", "feature4", "feature5"],
-  "revenue_model": "exactly how this makes money",
+  "revenue_model": "exactly how this makes money — be specific",
   "estimated_scope": "indie|mid|large|AAA",
   "roles_needed": ["role_id1", "role_id2", "role_id3"]
 }}\
 """
 
 REVIEW_PROMPT = """\
-You are the Lead Developer reviewing a team member's deliverable.
+You are the Lead Developer reviewing a team member's deliverable. Be rigorous.
 
 Project: {project_name}
 Role: {role_title}
 Expected deliverable: {deliverable_type}
 
-Their output:
+Output:
 {content}
 
-Review criteria:
-1. Is it specific enough? (No vague statements like "use good practices")
-2. Does it cover ALL required sections from the task?
-3. Is it professionally detailed (600+ words)?
-4. Does it build on and reference the team's other work?
-5. Are there any obvious gaps or errors?
+Score this on:
+1. Specificity — real names, numbers, systems. Not "use best practices."
+2. Coverage — does it hit every section the task required?
+3. Depth — is this detailed enough to actually build from? (600+ words minimum)
+4. Integration — does it reference and build on teammates' work?
+5. Quality — no obvious errors, hallucinations, or contradictions?
 
 Output ONLY this JSON:
 {{
-  "approved": true,
   "score": 8.5,
-  "feedback": "What's good and what's missing",
-  "revision_request": "Specific things to add/fix (empty string if approved)"
+  "feedback": "What's strong and what's weak — be specific",
+  "revision_request": "Exactly what to add or fix. Empty string if score >= 6.5."
 }}\
 """
 
 SYNTHESIS_PROMPT = """\
-You are the Lead Developer synthesizing the team's work into a master project document.
+You are the Lead Developer. The team has finished. Now synthesize their work into a master document.
 
 Project: {project_name}
 Type: {project_type}
 Vision: {vision}
 
-Team deliverables summary:
+Team deliverables:
 {deliverables_summary}
 
-Create a concise Executive Summary and Project Roadmap that:
-1. Summarizes the project vision and what makes it special
-2. Highlights the key decisions made by each team member
-3. Identifies the top 5 risks and mitigations
-4. Provides a clear Phase 1 action plan (first 30 days)
-5. Lists immediate next steps to start building
+Write a professional Executive Summary and Project Roadmap in markdown. Cover:
+1. What this project is and what makes it worth building
+2. The key decisions each team member made and why they matter
+3. The top 5 risks and how to mitigate them
+4. A concrete Phase 1 action plan for the first 30 days
+5. The three most important things to do this week to start
 
-Write as professional markdown. Be direct and actionable.\
+Be direct. Be specific. Every sentence should be actionable or informative — no filler.\
 """
 
 

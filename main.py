@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NexusAgent v2 — Local Self-Learning AI Agent"""
+"""Hermes — Local Self-Learning AI Agent"""
 import argparse
 import json
 import sys
@@ -7,7 +7,7 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser(
-        description="NexusAgent v2 — Local Self-Learning AI Agent",
+        description="Hermes — Local Self-Learning AI Agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

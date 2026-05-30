@@ -253,14 +253,14 @@ class NexusAgent:
 
     def run_cli(self):
         self._print_banner()
-        _p("Type [bold]/help[/bold] for commands, or just chat naturally.\n" if HAS_RICH
-           else "Type /help for commands, or just chat. /quit to exit.\n")
+        _p("Type [bold]/help[/bold] for commands, or just start talking.\n" if HAS_RICH
+           else "Type /help for commands. /quit to exit.\n")
 
         while True:
             try:
                 user_input = input("\n[you] " if not HAS_RICH else "")
                 if HAS_RICH:
-                    _console.print("[bold cyan]you>[/bold cyan] ", end="")
+                    _console.print("[bold white]you>[/bold white] ", end="")
                     user_input = input()
                 user_input = user_input.strip()
             except (KeyboardInterrupt, EOFError):
@@ -309,12 +309,12 @@ class NexusAgent:
             ) as prog:
                 prog.add_task("", total=None)
                 response = self.chat(message)
-            _console.print("\n[bold green]nexus>[/bold green]")
+            _console.print("\n[bold cyan]hermes>[/bold cyan]")
             _console.print(Markdown(response))
         else:
-            print("nexus> thinking...")
+            print("hermes> thinking...")
             response = self.chat(message)
-            print(f"\nnexus> {response}")
+            print(f"\nhermes> {response}")
 
     def _handle_command(self, raw: str):
         parts = raw.strip().split(maxsplit=1)
@@ -356,7 +356,7 @@ class NexusAgent:
 
     def _cmd_help(self, _):
         text = """
-**NexusAgent v2 Commands**
+**Hermes — Commands**
 
 **🧠 Solo Agent**
 | Command | Description |
@@ -800,18 +800,17 @@ class NexusAgent:
         mem_count = self._memory.semantic.count()
         if HAS_RICH:
             _console.print(Panel(
-                "[bold cyan]NexusAgent[/bold cyan]  [dim]v2.0.0[/dim]\n"
-                "[dim]Local Self-Learning AI Agent[/dim]\n\n"
-                f"[dim]  Model:    [white]{self._model.active_backend}[/white][/dim]\n"
-                f"[dim]  Skills:   [white]{skill_count} learned[/white][/dim]\n"
-                f"[dim]  Memories: [white]{mem_count} stored[/white][/dim]\n"
+                "[bold cyan]Hermes[/bold cyan]  [dim]v2.0.0 — Local AI Agent[/dim]\n\n"
+                f"[dim]  Model:     [white]{self._model.active_backend}[/white][/dim]\n"
+                f"[dim]  Skills:    [white]{skill_count} learned[/white][/dim]\n"
+                f"[dim]  Memories:  [white]{mem_count} stored[/white][/dim]\n"
                 f"[dim]  Heartbeat: [white]{'active' if self._heartbeat.is_alive() else 'off'}[/white][/dim]",
                 border_style="cyan",
                 expand=False,
             ))
         else:
             print("=" * 52)
-            print("  NexusAgent v2.0.0 — Local Self-Learning AI")
+            print("  Hermes v2.0.0 — Local AI Agent")
             print(f"  Model: {self._model.active_backend} | Skills: {skill_count} | Memories: {mem_count}")
             print("=" * 52)
 

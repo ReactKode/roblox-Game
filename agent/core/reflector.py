@@ -8,20 +8,23 @@ from .logger import get_logger
 
 log = get_logger(__name__)
 
-REFLECT_PROMPT = """You just completed a task. Critically analyze your own performance.
+REFLECT_PROMPT = """Analyze your own performance on this task. Be honest and specific.
 
 Task: {task}
 Tools used: {tools_used}
-Number of steps: {iterations}
+Steps taken: {iterations}
 Success: {success}
-Final answer preview: {answer_preview}
+Answer preview: {answer_preview}
 
-Output ONLY this JSON — no other text:
+What actually worked? What was inefficient or wrong? What would you do differently?
+Don't be generic. If you used too many steps, say why. If a tool failed, name it.
+
+Output ONLY this JSON:
 {{
-  "what_worked": "what approach or tool was most effective",
-  "what_failed": "what went wrong or was inefficient (write 'nothing' if fully successful)",
-  "lesson": "one concrete actionable lesson for future similar tasks",
-  "next_time": "specific change to make next time",
+  "what_worked": "the specific approach or tool that was most effective",
+  "what_failed": "what went wrong or was inefficient — 'nothing' only if truly flawless",
+  "lesson": "one concrete, actionable lesson for next time — not a platitude",
+  "next_time": "the specific change you would make if given this task again",
   "confidence": 0.85,
   "tags": ["keyword1", "keyword2"],
   "skill_domain": "primary domain: coding/research/blender/unity/godot/business/general"
